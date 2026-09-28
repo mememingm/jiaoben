@@ -1,0 +1,15 @@
+{
+  "base_url": "https://admin.nexsimus.com",
+  "credential_file": "C:/Users/你的用户名/Desktop/nexsim-account.txt",
+  "customer_label": "填写客户名称",
+  "org_id": 1,
+  "product_id": null,
+  "product_code": "P_VOICE_SMS_30M_100",
+  "target": 1,
+  "output_dir": "C:/Users/你的用户名/Desktop/esim二维码/本批次",
+  "qr_dir": "C:/Users/你的用户名/Desktop/esim二维码/本批次",
+  "csv_template": "C:/Users/你的用户名/Desktop/esim二维码/开户激活模板.csv",
+  "poll_seconds": 5,
+  "poll_attempts": 360,
+  "report_filename": "激活核对表.xlsx"
+}

@@ -1,0 +1,12 @@
+{
+  "base_url": "https://admin.nexsimus.com",
+  "credential_file": "C:/Users/27792/Desktop/pddhuhu.txt",
+  "customer_label": "pddhuhu（老平台）",
+  "org_id": 564,
+  "product_id": null,
+  "output_dir": "C:/Users/27792/Desktop/esim二维码/esim状态结果",
+  "page_size": 100,
+  "query_params": {
+    "simType": "ESIM"
+  }
+}

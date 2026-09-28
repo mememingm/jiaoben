@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>eSIM Profile Status</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">NEXSIM / STATUS + WRITE PREP</p>
+        <h1>eSIM Profile Status</h1>
+        <p class="subtitle">读取平台原始 Profile 状态，并准备未写卡的 RELEASED 批次清单</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="load-history" class="topbar-button" type="button" title="读取最近一次已保存的查询结果">
+          ↺ 加载上次结果
+        </button>
+        <div class="service-state"><span class="state-dot"></span><span>本地服务</span></div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="control-column">
+        <form id="query-form" class="panel query-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">QUERY</p>
+              <h2>开始一次查询</h2>
+            </div>
+            <span class="read-only-badge">只读</span>
+          </div>
+
+          <label class="field-label" for="username">后台账号</label>
+          <input id="username" name="username" autocomplete="username" required>
+
+          <label class="field-label" for="password">后台密码</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+          <details class="advanced-fields">
+            <summary>高级设置</summary>
+            <label class="field-label" for="base-url">后台地址</label>
+            <input id="base-url" value="https://admin.nexsimus.com" inputmode="url">
+            <p class="field-help">默认地址适用于 NexSim 管理后台。</p>
+          </details>
+
+          <fieldset class="scope-fieldset">
+            <legend>查询范围</legend>
+            <div class="segmented-control">
+              <label><input type="radio" name="scope" value="all" checked><span>全部 eSIM</span></label>
+              <label><input type="radio" name="scope" value="selected"><span>指定 ICCID</span></label>
+            </div>
+            <textarea id="iccids" disabled rows="5" placeholder="每行一个 ICCID，也支持逗号分隔"></textarea>
+            <p class="field-help">指定范围时，只请求匹配到的卡。</p>
+          </fieldset>
+
+          <div class="query-actions">
+            <button id="query-button" class="button button-primary" type="submit">
+              <span class="button-mark">→</span> 获取 eSIM 状态
+            </button>
+            <button id="cancel-button" class="button button-quiet" type="button" disabled>取消当前查询</button>
+          </div>
+          <p id="form-message" class="form-message" role="status"></p>
+        </form>
+
+        <section class="panel batch-panel" aria-labelledby="batch-title">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">WRITE BATCH</p>
+              <h2 id="batch-title">准备写卡批次</h2>
+            </div>
+            <span class="read-only-badge">未写卡</span>
+          </div>
+          <p class="batch-intro">只接收查询成功且 Profile 为 RELEASED 的卡。创建批次不会获取二维码；只有你明确点击一次性按钮后，才会逐张取 LPA 并生成二维码。</p>
+          <div class="batch-count-row">
+            <label class="field-label" for="batch-target">目标数量</label>
+            <input id="batch-target" type="number" min="1" max="200" value="200" inputmode="numeric">
+          </div>
+          <div class="batch-actions">
+            <button id="select-released-button" class="button button-secondary" type="button" disabled>自动选择前 N 张</button>
+            <button id="clear-selection-button" class="button button-secondary" type="button" disabled>清除选择</button>
+          </div>
+          <p id="batch-selection" class="field-help">已选择 0 张；目标数量用于“自动选择前 N 张”，生成批次按勾选数量。</p>
+          <button id="create-batch-button" class="button button-primary" type="button" disabled>生成写卡批次清单</button>
+          <p id="batch-message" class="form-message" role="status"></p>
+          <div id="batch-result" class="batch-result" hidden></div>
+        </section>
+
+        <section class="panel safety-panel">
+          <div class="safety-icon">✓</div>
+          <div>
+            <h3>请求范围已锁定</h3>
+            <p>查询和生成批次不会触碰二维码；一次性获取按钮每张卡最多请求一次，超时不重试。</p>
+          </div>
+        </section>
+      </aside>
+
+      <section class="results-column">
+        <section class="metrics-grid" aria-label="状态统计">
+          <div class="metric-card metric-total"><span>全部记录</span><strong id="metric-total">0</strong></div>
+          <div class="metric-card metric-installed"><span>已安装 · INSTALLED</span><strong id="metric-installed">0</strong></div>
+          <div class="metric-card metric-released"><span>已释放待下载 · RELEASED</span><strong id="metric-released">0</strong></div>
+          <div class="metric-card metric-failed"><span>查询失败</span><strong id="metric-failed">0</strong></div>
+        </section>
+
+        <section class="panel results-panel">
+          <div class="results-heading">
+            <div>
+              <p class="section-kicker">RESULTS</p>
+              <h2>Profile 状态明细</h2>
+            </div>
+            <div class="results-meta">
+              <span id="history-account" class="history-account" hidden></span>
+              <span id="record-count" class="record-count">0 / 0 条</span>
+            </div>
+          </div>
+
+          <div class="toolbar">
+            <label class="search-box">
+              <span class="sr-only">搜索记录</span>
+              <span class="search-mark">⌕</span>
+              <input id="search" type="search" placeholder="搜索 ICCID 或原始字段">
+            </label>
+            <select id="status-filter" aria-label="按 Profile 状态筛选">
+              <option value="all">全部 Profile 状态</option>
+              <option value="INSTALLED">已安装（INSTALLED）</option>
+              <option value="RELEASED">已释放待下载（RELEASED）</option>
+              <option value="failed">查询失败</option>
+            </select>
+            <button id="export-iccids" class="button button-secondary toolbar-button" type="button" disabled
+                    title="导出当前筛选列表中的 ICCID">↓ 导出 ICCID TXT</button>
+          </div>
+
+          <div id="progress-panel" class="progress-panel" hidden>
+            <div class="progress-line"><span id="progress-message">准备查询</span><strong id="progress-percent">0%</strong></div>
+            <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th class="selection-column">选择</th><th>ICCID</th><th>库存 status</th><th>Profile 状态</th><th>更新时间</th><th>查询结果</th></tr>
+              </thead>
+              <tbody id="result-body">
+                <tr class="empty-row"><td colspan="6"><div class="empty-state"><span class="empty-glyph">◌</span><strong>等待查询</strong><span>输入账号后，结果会显示在这里。</span></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="detail-section">
+            <div class="detail-heading"><span>原始字段</span><span id="detail-label">未选择记录</span></div>
+            <pre id="detail-content">单击一条记录查看平台原始字段。</pre>
+          </div>
+
+          <div class="result-footer">
+            <span id="status-message">准备就绪</span>
+            <span id="output-paths"></span>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
