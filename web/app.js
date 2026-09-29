@@ -1,6 +1,7 @@
 const state = {
   jobId: null,
   rows: [],
+  querySummary: null,
   filteredRows: [],
   selectedIndex: null,
   selectedInventoryIds: new Set(),
@@ -90,6 +91,7 @@ async function startQuery(event) {
   }
   setBusy(true);
   state.rows = [];
+  state.querySummary = null;
   state.selectedIndex = null;
   state.selectedInventoryIds.clear();
   state.batch = null;
@@ -132,9 +134,10 @@ async function pollJob() {
     $("status-message").textContent = data.message || "正在处理……";
     if (data.state === "done") {
       state.rows = Array.isArray(data.rows) ? data.rows : [];
+      state.querySummary = normalizeQuerySummary(data.profile_query_summary, state.rows);
       setHistoryAccount(data.account);
       $("output-paths").textContent = outputLabel(data.json_path, data.csv_path);
-      finishQuery("查询完成，结果已保存。", false);
+      finishQuery(queryCompletionMessage(state.querySummary), false);
       return;
     }
     if (data.state === "failed") {
@@ -218,7 +221,11 @@ function renderHistoryList(items) {
     const meta = document.createElement("span");
     const statuses = Object.entries(item.statuses || {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
     meta.textContent = `${item.account || "未知账号"} · ${item.count || 0} 条${statuses ? ` · ${statuses}` : ""}`;
-    info.append(title, meta);
+    const summary = normalizeQuerySummary(item.profile_query_summary, []);
+    const quality = document.createElement("span");
+    quality.className = `history-quality ${summary.complete ? "is-complete" : "is-incomplete"}`;
+    quality.textContent = `完整度 ${formatRate(summary.success_rate)} · 成功 ${summary.succeeded}/${summary.total}`;
+    info.append(title, meta, quality);
     const actions = document.createElement("div");
     actions.className = "history-actions";
     const load = document.createElement("button");
@@ -251,6 +258,7 @@ async function loadHistory(filename) {
     if (!response.ok) throw new Error(data.error || "无法读取历史记录。");
 
     state.rows = Array.isArray(data.records) ? data.records : [];
+    state.querySummary = normalizeQuerySummary(data.profile_query_summary, state.rows);
     state.selectedIndex = null;
     state.selectedInventoryIds.clear();
     state.batch = null;
@@ -270,9 +278,12 @@ async function loadHistory(filename) {
     setProgress(100, "已加载上次结果");
     const queriedAt = formatHistoryTime(data.queried_at);
     const accountLabel = data.account || "未知账号（旧记录）";
-    $("status-message").textContent = queriedAt
+    const loadedLabel = queriedAt
       ? `已加载查询记录（账号：${accountLabel}；查询时间：${queriedAt}）。`
       : `已加载查询记录（账号：${accountLabel}）。`;
+    $("status-message").textContent = state.querySummary.complete
+      ? loadedLabel
+      : `${loadedLabel} 结果不完整，不能用于核对激活数量。`;
     closeHistory();
   } catch (error) {
     setProgress(0, "历史记录未加载");
@@ -333,11 +344,92 @@ function setProgress(percent, message) {
   progressMessage.textContent = message;
 }
 
+function deriveQuerySummary(rows) {
+  const total = rows.length;
+  let succeeded = 0;
+  let retriedRecords = 0;
+  let recoveredAfterRetry = 0;
+  rows.forEach((row) => {
+    const success = row.esimProfileStatusQueryStatus === "ok"
+      || (row.esimProfileStatusQueryStatus !== "failed"
+        && Object.prototype.hasOwnProperty.call(row, "esimProfileStatus"));
+    if (success) succeeded += 1;
+    const attempts = Number.isInteger(row.esimProfileStatusQueryAttempts)
+      ? row.esimProfileStatusQueryAttempts : 1;
+    if (attempts > 1) {
+      retriedRecords += 1;
+      if (success) recoveredAfterRetry += 1;
+    }
+  });
+  const failed = total - succeeded;
+  return {
+    total,
+    succeeded,
+    failed,
+    success_rate: total ? Math.round((succeeded / total * 100) * 10) / 10 : 100,
+    complete: failed === 0,
+    retried_records: retriedRecords,
+    recovered_after_retry: recoveredAfterRetry,
+    failure_reasons: rows.reduce((reasons, row) => {
+      if (row.esimProfileStatusQueryStatus !== "failed") return reasons;
+      const reason = String(row.esimProfileStatusQueryError || "未知失败原因");
+      reasons[reason] = (reasons[reason] || 0) + 1;
+      return reasons;
+    }, {}),
+  };
+}
+
+function normalizeQuerySummary(value, rows) {
+  const fallback = deriveQuerySummary(rows);
+  if (!value || typeof value !== "object") return fallback;
+  const total = Number.isFinite(Number(value.total)) ? Number(value.total) : fallback.total;
+  const succeeded = Number.isFinite(Number(value.succeeded)) ? Number(value.succeeded) : fallback.succeeded;
+  const failed = Number.isFinite(Number(value.failed)) ? Number(value.failed) : Math.max(0, total - succeeded);
+  const rateValue = Number(value.success_rate);
+  return {
+    total,
+    succeeded,
+    failed,
+    success_rate: Number.isFinite(rateValue) ? rateValue : (total ? succeeded / total * 100 : 100),
+    complete: failed === 0 && succeeded === total,
+    retried_records: Number(value.retried_records) || 0,
+    recovered_after_retry: Number(value.recovered_after_retry) || 0,
+    failure_reasons: value.failure_reasons && typeof value.failure_reasons === "object"
+      ? value.failure_reasons : fallback.failure_reasons,
+  };
+}
+
+function formatRate(value) {
+  const rounded = Math.round((Number(value) || 0) * 10) / 10;
+  return `${rounded.toFixed(rounded % 1 === 0 ? 0 : 1)}%`;
+}
+
+function queryCompletionMessage(summary) {
+  if (summary.complete) return `查询完整：成功 ${summary.succeeded}/${summary.total}，结果已保存。`;
+  return `查询结束但结果不完整：成功 ${summary.succeeded}/${summary.total}，失败 ${summary.failed}。不能用于核对激活数量。`;
+}
+
 function renderSummary() {
   $("metric-total").textContent = state.rows.length;
   $("metric-installed").textContent = state.rows.filter((row) => row.esimProfileStatus === "INSTALLED").length;
   $("metric-released").textContent = state.rows.filter((row) => row.esimProfileStatus === "RELEASED").length;
   $("metric-failed").textContent = state.rows.filter((row) => row.esimProfileStatusQueryStatus === "failed").length;
+  const summary = normalizeQuerySummary(state.querySummary, state.rows);
+  state.querySummary = summary;
+  const quality = $("query-quality");
+  quality.hidden = summary.total === 0;
+  quality.className = `query-quality ${summary.complete ? "query-quality-complete" : "query-quality-incomplete"}`;
+  $("query-quality-title").textContent = summary.complete
+    ? "查询完整，可用于状态核对"
+    : "结果不完整，不能用于核对激活数量";
+  const retryText = summary.retried_records > 0
+    ? ` · 重试 ${summary.retried_records} 条，恢复 ${summary.recovered_after_retry} 条`
+    : "";
+  const topFailure = Object.entries(summary.failure_reasons || {})
+    .sort((left, right) => Number(right[1]) - Number(left[1]))[0];
+  const failureText = topFailure ? ` · 主要失败：${topFailure[0]} × ${topFailure[1]}` : "";
+  $("query-quality-detail").textContent = `成功 ${summary.succeeded}/${summary.total} · 失败 ${summary.failed}${retryText}${failureText}`;
+  $("query-quality-rate").textContent = `完整度 ${formatRate(summary.success_rate)}`;
   updateBatchControls();
 }
 

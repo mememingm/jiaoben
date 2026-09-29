@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,10 +37,17 @@ ESIM_USAGE_STATUS_PATTERN = re.compile(
 )
 ProgressCallback = Callable[[str, int, int], None]
 CancelCallback = Callable[[], bool]
+TRANSIENT_PROFILE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+PROFILE_MAX_ATTEMPTS = 4
+PROFILE_RETRY_COOLDOWNS = (0.0, 1.0, 2.0, 4.0)
 
 
 class Stop(RuntimeError):
     """Safe, actionable error shown without credentials or response secrets."""
+
+
+class TransientProfileError(Stop):
+    """Temporary read-only Profile failure that can be retried safely."""
 
 
 def now() -> str:
@@ -197,11 +205,16 @@ class Client:
             raise Stop("安全拦截：二维码或激活码接口永久禁止调用。")
         if endpoint != INVENTORY_PAGE_ENDPOINT and not ESIM_USAGE_STATUS_PATTERN.fullmatch(endpoint):
             raise Stop("安全拦截：状态工具只允许库存分页和 Profile 状态 GET 接口。")
+        is_profile_request = bool(ESIM_USAGE_STATUS_PATTERN.fullmatch(endpoint))
         try:
             response = self.session.get(self.base + endpoint, params=params or {},
                                         timeout=(10, 60), allow_redirects=False)
         except requests.RequestException as exc:
+            if is_profile_request:
+                raise TransientProfileError("Profile 状态查询网络失败。") from exc
             raise Stop("状态查询网络失败；未执行其他操作。") from exc
+        if is_profile_request and response.status_code in TRANSIENT_PROFILE_HTTP_STATUSES:
+            raise TransientProfileError(f"状态查询失败（HTTP {response.status_code}）。")
         try:
             payload = response.json()
         except ValueError as exc:
@@ -227,13 +240,64 @@ class Client:
         return data
 
 
-def _record_profile_failure(row: dict[str, Any], error: str) -> None:
+def _record_profile_failure(row: dict[str, Any], error: str, attempts: int) -> None:
     """记录逐条 Profile 查询失败，不伪造原始状态值。"""
     row.pop("esimProfileStatus", None)
     row.pop("esimProfileUpdatedAt", None)
     row.pop("esimProfileStatusUpdatedAt", None)
     row["esimProfileStatusQueryStatus"] = "failed"
     row["esimProfileStatusQueryError"] = error
+    row["esimProfileStatusQueryAttempts"] = attempts
+    row["esimProfileStatusRecoveredAfterRetry"] = False
+
+
+def build_profile_query_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总查询完整度；兼容没有重试字段的旧记录。"""
+    total = len(rows)
+    succeeded = 0
+    retried_records = 0
+    recovered_after_retry = 0
+    failure_reasons: dict[str, int] = {}
+    for row in rows:
+        query_status = row.get("esimProfileStatusQueryStatus")
+        success = query_status == "ok" or (
+            query_status != "failed" and "esimProfileStatus" in row
+        )
+        if success:
+            succeeded += 1
+        attempts = row.get("esimProfileStatusQueryAttempts", 1)
+        if type(attempts) is not int or attempts < 1:
+            attempts = 1
+        if attempts > 1:
+            retried_records += 1
+            if success:
+                recovered_after_retry += 1
+        if not success:
+            reason = str(row.get("esimProfileStatusQueryError") or "未知失败原因")
+            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+    failed = total - succeeded
+    return {
+        "total": total,
+        "succeeded": succeeded,
+        "failed": failed,
+        "success_rate": round(succeeded / total * 100, 1) if total else 100.0,
+        "complete": failed == 0,
+        "retried_records": retried_records,
+        "recovered_after_retry": recovered_after_retry,
+        "failure_reasons": failure_reasons,
+    }
+
+
+def _wait_before_profile_retry(
+    seconds: float,
+    cancelled: CancelCallback | None,
+) -> None:
+    """分段等待，避免退避期间无法及时取消任务。"""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if cancelled and cancelled():
+            raise Stop("查询已取消。")
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
 
 def enrich_profile_status(
@@ -248,25 +312,31 @@ def enrich_profile_status(
     if not rows:
         return
 
-    def query_one(index: int, row: dict[str, Any]) -> tuple[int, dict[str, Any] | None, str | None]:
+    def query_one(
+        index: int,
+        row: dict[str, Any],
+        worker_clients: threading.local,
+    ) -> tuple[int, dict[str, Any] | None, str | None, bool]:
         if cancelled and cancelled():
-            return index, None, "查询已取消。"
+            return index, None, "查询已取消。", False
         inventory_id = row.get("id")
         if type(inventory_id) is not int or inventory_id <= 0:
-            return index, None, "库存记录缺少有效的数字 id。"
-        worker_client = getattr(thread_local, "client", None)
+            return index, None, "库存记录缺少有效的数字 id。", False
+        worker_client = getattr(worker_clients, "client", None)
         if worker_client is None:
             worker_client = client.clone_for_worker()
-            thread_local.client = worker_client
+            worker_clients.client = worker_client
         try:
             profile = worker_client.get_esim_usage_status(inventory_id)
             if "status" not in profile:
-                return index, None, "Profile 状态接口未返回 data.status。"
-            return index, profile, None
+                return index, None, "Profile 状态接口未返回 data.status。", False
+            return index, profile, None, False
+        except TransientProfileError as exc:
+            return index, None, str(exc), True
         except Stop as exc:
-            return index, None, str(exc)
+            return index, None, str(exc), False
         except Exception:
-            return index, None, "Profile 状态查询异常。"
+            return index, None, "Profile 状态查询异常。", False
 
     # 先处理库存接口偶尔附带的同名字段，再并发请求专用 Profile 接口。
     for row in rows:
@@ -278,26 +348,51 @@ def enrich_profile_status(
         if inventory_updated_at is not None:
             row["inventoryEsimProfileUpdatedAt"] = inventory_updated_at
 
-    thread_local = threading.local()
-    completed = 0
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="profile-status") as executor:
-        futures = [executor.submit(query_one, index, row)
-                   for index, row in enumerate(rows)]
-        for future in as_completed(futures):
-            if cancelled and cancelled():
-                raise Stop("查询已取消。")
-            index, profile, error = future.result()
-            row = rows[index]
-            if error:
-                _record_profile_failure(row, error)
-            else:
-                row["esimProfileStatus"] = strip_forbidden(profile["status"])
-                if "lastUpdatedAt" in profile:
-                    row["esimProfileStatusUpdatedAt"] = strip_forbidden(profile["lastUpdatedAt"])
-                row["esimProfileStatusQueryStatus"] = "ok"
-            completed += 1
+    pending = set(range(total))
+    for attempt in range(1, PROFILE_MAX_ATTEMPTS + 1):
+        if not pending:
+            break
+        cooldown = PROFILE_RETRY_COOLDOWNS[attempt - 1]
+        stage = "profile" if attempt == 1 else f"profile_retry_{attempt}"
+        if attempt > 1:
             if progress:
-                progress("profile", completed, total)
+                progress(f"profile_retry_wait_{attempt}", 0, len(pending))
+            _wait_before_profile_retry(cooldown, cancelled)
+
+        round_indexes = sorted(pending)
+        next_pending: set[int] = set()
+        round_workers = max(1, workers // (2 ** (attempt - 1)))
+        worker_clients = threading.local()
+        completed = 0
+        with ThreadPoolExecutor(
+            max_workers=round_workers,
+            thread_name_prefix=f"profile-status-{attempt}",
+        ) as executor:
+            futures = [
+                executor.submit(query_one, index, rows[index], worker_clients)
+                for index in round_indexes
+            ]
+            for future in as_completed(futures):
+                if cancelled and cancelled():
+                    raise Stop("查询已取消。")
+                index, profile, error, retryable = future.result()
+                row = rows[index]
+                row["esimProfileStatusQueryAttempts"] = attempt
+                if error is None and profile is not None:
+                    row["esimProfileStatus"] = strip_forbidden(profile["status"])
+                    if "lastUpdatedAt" in profile:
+                        row["esimProfileStatusUpdatedAt"] = strip_forbidden(profile["lastUpdatedAt"])
+                    row["esimProfileStatusQueryStatus"] = "ok"
+                    row.pop("esimProfileStatusQueryError", None)
+                    row["esimProfileStatusRecoveredAfterRetry"] = attempt > 1
+                elif retryable and attempt < PROFILE_MAX_ATTEMPTS:
+                    next_pending.add(index)
+                else:
+                    _record_profile_failure(row, error or "Profile 状态查询异常。", attempt)
+                completed += 1
+                if progress:
+                    progress(stage, completed, len(round_indexes))
+        pending = next_pending
 
 
 def fetch_rows(
@@ -402,6 +497,7 @@ def write_outputs(
                 "sources": [INVENTORY_PAGE_ENDPOINT,
                             "/api/inventory/{inventoryId}/esim-usage-status"],
                 "count": len(rows),
+                "profile_query_summary": build_profile_query_summary(rows),
                 "qr_operations": "none", "records": rows}
     atomic_write(json_path, json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"))
     keys = sorted({str(key) for row in rows for key in row})

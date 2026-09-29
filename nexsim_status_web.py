@@ -100,6 +100,7 @@ class JobManager:
             "stage": "login",
             "message": "正在登录后台……",
             "rows": [],
+            "profile_query_summary": None,
             "json_path": "",
             "csv_path": "",
             "error": "",
@@ -126,8 +127,26 @@ class JobManager:
                 percent = 5 + ratio * 15
                 message = f"读取库存分页：{current} / {total}"
             elif stage == "profile":
-                percent = 20 + ratio * 75
+                percent = 20 + ratio * 55
                 message = f"读取 Profile 状态：{current} / {total}"
+            elif stage.startswith("profile_retry_wait_"):
+                attempt = int(stage.rsplit("_", 1)[-1])
+                retry_base = {2: 75, 3: 82, 4: 89}.get(attempt, 75)
+                percent = retry_base
+                cooldown = checker.PROFILE_RETRY_COOLDOWNS[attempt - 1]
+                message = (
+                    f"平台出现临时错误，{cooldown:g} 秒后开始第 {attempt}/"
+                    f"{checker.PROFILE_MAX_ATTEMPTS} 轮重试（{total} 条）"
+                )
+            elif stage.startswith("profile_retry_"):
+                attempt = int(stage.rsplit("_", 1)[-1])
+                retry_base = {2: 75, 3: 82, 4: 89}.get(attempt, 75)
+                retry_span = {2: 7, 3: 7, 4: 6}.get(attempt, 6)
+                percent = retry_base + ratio * retry_span
+                message = (
+                    f"重试临时失败：第 {attempt}/{checker.PROFILE_MAX_ATTEMPTS} 轮 · "
+                    f"{current} / {total}"
+                )
             else:
                 percent = 95 + ratio * 5
                 message = "正在保存 JSON 和 CSV……"
@@ -142,8 +161,16 @@ class JobManager:
                 cancelled=job["cancel"].is_set,
             )
             rows, json_path, csv_path = result
+            summary = checker.build_profile_query_summary(rows)
+            if summary["complete"]:
+                message = "查询完整，结果已保存。"
+            else:
+                message = (
+                    f"查询结束但结果不完整：成功 {summary['succeeded']}/"
+                    f"{summary['total']}，仍有 {summary['failed']} 条失败。"
+                )
             self._update(job_id, state="done", progress=100, stage="done",
-                         message="查询完成，结果已保存。", rows=rows,
+                         message=message, rows=rows, profile_query_summary=summary,
                          json_path=str(json_path), csv_path=str(csv_path))
         except checker.Stop as exc:
             if job["cancel"].is_set():
@@ -203,6 +230,7 @@ class JobManager:
                 rows = payload.get("records", [])
                 if not isinstance(rows, list):
                     continue
+                summary = checker.build_profile_query_summary(rows)
                 statuses: dict[str, int] = {}
                 for row in rows:
                     if isinstance(row, dict):
@@ -214,6 +242,7 @@ class JobManager:
                     "queried_at": payload.get("queried_at", ""),
                     "count": len(rows),
                     "statuses": statuses,
+                    "profile_query_summary": summary,
                 })
             except (OSError, json.JSONDecodeError, TypeError):
                 continue
@@ -234,6 +263,9 @@ class JobManager:
         if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
             return None
         payload["account"] = str(payload.get("account") or "未知账号（旧记录）")
+        payload["profile_query_summary"] = checker.build_profile_query_summary(
+            payload["records"]
+        )
         payload["history_filename"] = path.name
         payload["json_path"] = str(path)
         payload["csv_path"] = str(path.with_suffix(".csv"))

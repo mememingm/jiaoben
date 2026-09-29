@@ -134,12 +134,12 @@
             <strong id="metric-total">0</strong>
           </article>
           <article class="metric-card metric-installed">
-            <span>已安装</span>
+            <span>本轮查到已安装</span>
             <strong id="metric-installed">0</strong>
             <small>INSTALLED</small>
           </article>
           <article class="metric-card metric-released">
-            <span>已释放待下载</span>
+            <span>本轮查到待下载</span>
             <strong id="metric-released">0</strong>
             <small>RELEASED</small>
           </article>
@@ -147,6 +147,14 @@
             <span>查询失败</span>
             <strong id="metric-failed">0</strong>
           </article>
+        </section>
+
+        <section id="query-quality" class="query-quality" aria-live="polite" hidden>
+          <div>
+            <strong id="query-quality-title">等待查询完整度</strong>
+            <span id="query-quality-detail"></span>
+          </div>
+          <strong id="query-quality-rate">完整度 0%</strong>
         </section>
 
         <section class="table-container">

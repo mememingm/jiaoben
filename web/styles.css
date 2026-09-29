@@ -658,8 +658,8 @@ select:disabled {
   overflow: hidden;
   color: var(--muted);
   font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  white-space: normal;
 }
 
 .metric-card strong {
@@ -685,6 +685,64 @@ select:disabled {
 .metric-released strong { color: var(--amber); }
 .metric-failed::before { background: var(--red); }
 .metric-failed strong { color: var(--red); }
+
+.query-quality {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.query-quality[hidden] {
+  display: none;
+}
+
+.query-quality > div {
+  min-width: 0;
+}
+
+.query-quality strong,
+.query-quality span {
+  display: block;
+}
+
+.query-quality strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.query-quality span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.query-quality > strong {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+}
+
+.query-quality-complete {
+  border-color: rgba(72, 184, 120, .3);
+  background: var(--green-soft);
+}
+
+.query-quality-complete > strong {
+  color: var(--green);
+}
+
+.query-quality-incomplete {
+  border-color: rgba(239, 100, 100, .35);
+  background: var(--red-soft);
+}
+
+.query-quality-incomplete > strong {
+  color: var(--red);
+}
 
 .table-container {
   display: flex;
@@ -1132,6 +1190,14 @@ select:disabled {
   white-space: nowrap;
 }
 
+.history-item .history-quality.is-complete {
+  color: var(--green);
+}
+
+.history-item .history-quality.is-incomplete {
+  color: var(--red);
+}
+
 .history-item strong {
   color: var(--text-soft);
   font-size: 12px;
@@ -1468,6 +1534,12 @@ select:disabled {
 
   .metric-card strong {
     font-size: 23px;
+  }
+
+  .query-quality {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .table-header {
