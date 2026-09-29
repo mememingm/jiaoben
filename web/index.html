@@ -3,175 +3,246 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>eSIM Profile Status</title>
+  <meta name="color-scheme" content="dark">
+  <title>eSIM Profile Manager</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">NEXSIM / STATUS + WRITE PREP</p>
-        <h1>eSIM Profile Status</h1>
-        <p class="subtitle">读取平台原始 Profile 状态，并准备未写卡的 RELEASED 批次清单</p>
-      </div>
-      <div class="topbar-actions">
-        <button id="load-history" class="topbar-button" type="button" title="打开已保存的查询记录">
-          ▤ 查询记录
+  <div class="app-container">
+    <header class="top-nav">
+      <a class="nav-brand" href="/" aria-label="eSIM Profile Manager 首页">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span class="brand-copy">
+          <strong>eSIM Profile Manager</strong>
+          <span>NexSim status console</span>
+        </span>
+      </a>
+      <div class="nav-actions">
+        <button id="load-history" class="nav-button" type="button" aria-expanded="false" aria-controls="history-panel">
+          <span class="clock-icon" aria-hidden="true"></span>
+          查询记录
         </button>
-        <div class="service-state"><span class="state-dot"></span><span>本地服务</span></div>
+        <div class="service-indicator" aria-label="本地服务运行中">
+          <span class="indicator-dot" aria-hidden="true"></span>
+          <span>本地服务</span>
+        </div>
       </div>
     </header>
 
-    <section id="history-panel" class="history-panel" hidden aria-labelledby="history-title">
-      <div class="history-panel-heading">
-        <div><p class="section-kicker">HISTORY</p><h2 id="history-title">查询记录</h2></div>
-        <button id="close-history" class="topbar-button history-close" type="button">关闭</button>
-      </div>
-      <p class="history-help">每次查询都会单独保存。加载不会重新请求后台；删除会同时移除对应的 JSON 和 CSV 文件。</p>
-      <div id="history-list" class="history-list"><div class="history-empty">正在读取记录……</div></div>
-    </section>
-
-    <main class="workspace">
-      <aside class="control-column">
-        <form id="query-form" class="panel query-panel">
-          <div class="panel-heading">
+    <main class="main-content">
+      <aside class="control-panel" aria-label="查询与批次控制">
+        <section class="panel query-panel">
+          <div class="panel-header">
             <div>
-              <p class="section-kicker">QUERY</p>
-              <h2>开始一次查询</h2>
+              <span class="panel-kicker">QUERY</span>
+              <h2>状态查询</h2>
             </div>
-            <span class="read-only-badge">只读</span>
+            <span class="badge badge-neutral">只读</span>
           </div>
 
-          <label class="field-label" for="username">后台账号</label>
-          <input id="username" name="username" autocomplete="username" required>
-
-          <label class="field-label" for="password">后台密码</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" required>
-
-          <details class="advanced-fields">
-            <summary>高级设置</summary>
-            <label class="field-label" for="base-url">后台地址</label>
-            <input id="base-url" value="https://admin.nexsimus.com" inputmode="url">
-            <p class="field-help">默认地址适用于 NexSim 管理后台。</p>
-          </details>
-
-          <fieldset class="scope-fieldset">
-            <legend>查询范围</legend>
-            <div class="segmented-control">
-              <label><input type="radio" name="scope" value="all" checked><span>全部 eSIM</span></label>
-              <label><input type="radio" name="scope" value="selected"><span>指定 ICCID</span></label>
+          <form id="query-form" class="panel-body">
+            <div class="form-field">
+              <label for="username">后台账号</label>
+              <input id="username" name="username" type="text" autocomplete="username" required>
             </div>
-            <textarea id="iccids" disabled rows="5" placeholder="每行一个 ICCID，也支持逗号分隔"></textarea>
-            <p class="field-help">指定范围时，只请求匹配到的卡。</p>
-          </fieldset>
 
-          <div class="query-actions">
-            <button id="query-button" class="button button-primary" type="submit">
-              <span class="button-mark">→</span> 获取 eSIM 状态
-            </button>
-            <button id="cancel-button" class="button button-quiet" type="button" disabled>取消当前查询</button>
-          </div>
-          <p id="form-message" class="form-message" role="status"></p>
-        </form>
-
-        <section class="panel batch-panel" aria-labelledby="batch-title">
-          <div class="panel-heading">
-            <div>
-              <p class="section-kicker">WRITE BATCH</p>
-              <h2 id="batch-title">准备写卡批次</h2>
+            <div class="form-field">
+              <label for="password">后台密码</label>
+              <input id="password" name="password" type="password" autocomplete="current-password" required>
             </div>
-            <span class="read-only-badge">未写卡</span>
-          </div>
-          <p class="batch-intro">只接收查询成功且 Profile 为 RELEASED 的卡。创建批次不会获取二维码；只有你明确点击一次性按钮后，才会逐张取 LPA 并生成二维码。</p>
-          <div class="batch-count-row">
-            <label class="field-label" for="batch-target">目标数量</label>
-            <input id="batch-target" type="number" min="1" max="200" value="200" inputmode="numeric">
-          </div>
-          <div class="batch-actions">
-            <button id="select-released-button" class="button button-secondary" type="button" disabled>自动选择前 N 张</button>
-            <button id="clear-selection-button" class="button button-secondary" type="button" disabled>清除选择</button>
-          </div>
-          <p id="batch-selection" class="field-help">已选择 0 张；目标数量用于“自动选择前 N 张”，生成批次按勾选数量。</p>
-          <button id="create-batch-button" class="button button-primary" type="button" disabled>生成写卡批次清单</button>
-          <p id="batch-message" class="form-message" role="status"></p>
-          <div id="batch-result" class="batch-result" hidden></div>
+
+            <details class="advanced-section">
+              <summary>高级设置</summary>
+              <div class="advanced-content">
+                <div class="form-field">
+                  <label for="base-url">后台地址</label>
+                  <input id="base-url" type="url" value="https://admin.nexsimus.com" required>
+                  <p class="field-hint">默认连接 NexSim 管理后台</p>
+                </div>
+              </div>
+            </details>
+
+            <fieldset class="scope-fieldset">
+              <legend>查询范围</legend>
+              <div class="segmented-control">
+                <label>
+                  <input type="radio" name="scope" value="all" checked>
+                  <span>全部 eSIM</span>
+                </label>
+                <label>
+                  <input type="radio" name="scope" value="selected">
+                  <span>指定 ICCID</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <div id="iccid-field" class="form-field" hidden>
+              <label for="iccids">ICCID 列表</label>
+              <textarea id="iccids" rows="4" disabled placeholder="每行一个 ICCID，也支持逗号分隔"></textarea>
+            </div>
+
+            <div class="form-actions">
+              <button id="query-button" class="button button-primary" type="submit">
+                <span>获取 eSIM 状态</span>
+                <span class="button-arrow" aria-hidden="true">&#8594;</span>
+              </button>
+              <button id="cancel-button" class="button button-quiet" type="button" disabled>取消查询</button>
+            </div>
+            <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
+          </form>
         </section>
 
-        <section class="panel safety-panel">
-          <div class="safety-icon">✓</div>
+        <section class="panel batch-panel" aria-labelledby="batch-title">
+          <div class="panel-header">
+            <div>
+              <span class="panel-kicker">WRITE BATCH</span>
+              <h2 id="batch-title">写卡批次</h2>
+            </div>
+            <span class="badge badge-blue">未写卡</span>
+          </div>
+          <div class="panel-body">
+            <p class="panel-intro">仅接收查询成功且 Profile 为 RELEASED 的卡。创建清单不会获取激活数据。</p>
+            <div class="form-field batch-count-field">
+              <label for="batch-target">目标数量</label>
+              <input id="batch-target" type="number" min="1" max="200" value="200" inputmode="numeric">
+            </div>
+            <div class="batch-actions">
+              <button id="select-released-button" class="button button-secondary" type="button" disabled>自动选择前 N 张</button>
+              <button id="clear-selection-button" class="button button-secondary" type="button" disabled>清除选择</button>
+            </div>
+            <p id="batch-selection" class="field-hint">已选择 0 张；目标数量用于自动选择，单批最多 200 张。</p>
+            <button id="create-batch-button" class="button button-primary" type="button" disabled>生成批次清单</button>
+            <p id="batch-message" class="form-message" role="status" aria-live="polite"></p>
+            <div id="batch-result" class="batch-result" hidden></div>
+          </div>
+        </section>
+
+        <section class="safety-note" aria-label="操作边界">
+          <span class="safety-check" aria-hidden="true">&#10003;</span>
           <div>
-            <h3>请求范围已锁定</h3>
-            <p>查询和生成批次不会触碰二维码；一次性获取按钮每张卡最多请求一次，超时不重试。</p>
+            <strong>请求范围已锁定</strong>
+            <p>状态查询和批次清单不触碰激活数据；一次性任务不会自动重试。</p>
           </div>
         </section>
       </aside>
 
-      <section class="results-column">
+      <section class="data-panel" aria-label="Profile 查询结果">
         <section class="metrics-grid" aria-label="状态统计">
-          <div class="metric-card metric-total"><span>全部记录</span><strong id="metric-total">0</strong></div>
-          <div class="metric-card metric-installed"><span>已安装 · INSTALLED</span><strong id="metric-installed">0</strong></div>
-          <div class="metric-card metric-released"><span>已释放待下载 · RELEASED</span><strong id="metric-released">0</strong></div>
-          <div class="metric-card metric-failed"><span>查询失败</span><strong id="metric-failed">0</strong></div>
+          <article class="metric-card metric-total">
+            <span>全部记录</span>
+            <strong id="metric-total">0</strong>
+          </article>
+          <article class="metric-card metric-installed">
+            <span>已安装</span>
+            <strong id="metric-installed">0</strong>
+            <small>INSTALLED</small>
+          </article>
+          <article class="metric-card metric-released">
+            <span>已释放待下载</span>
+            <strong id="metric-released">0</strong>
+            <small>RELEASED</small>
+          </article>
+          <article class="metric-card metric-failed">
+            <span>查询失败</span>
+            <strong id="metric-failed">0</strong>
+          </article>
         </section>
 
-        <section class="panel results-panel">
-          <div class="results-heading">
+        <section class="table-container">
+          <div class="table-header">
             <div>
-              <p class="section-kicker">RESULTS</p>
+              <span class="panel-kicker">RESULTS</span>
               <h2>Profile 状态明细</h2>
             </div>
-            <div class="results-meta">
-              <span id="history-account" class="history-account" hidden></span>
+            <div class="table-meta">
+              <span id="history-account" class="history-tag" hidden></span>
               <span id="record-count" class="record-count">0 / 0 条</span>
             </div>
           </div>
 
           <div class="toolbar">
-            <label class="search-box">
+            <label class="search-box" for="search">
+              <span class="search-icon" aria-hidden="true"></span>
               <span class="sr-only">搜索记录</span>
-              <span class="search-mark">⌕</span>
               <input id="search" type="search" placeholder="搜索 ICCID 或原始字段">
             </label>
             <select id="status-filter" aria-label="按 Profile 状态筛选">
-              <option value="all">全部 Profile 状态</option>
+              <option value="all">全部状态</option>
               <option value="INSTALLED">已安装（INSTALLED）</option>
               <option value="RELEASED">已释放待下载（RELEASED）</option>
               <option value="failed">查询失败</option>
             </select>
-            <button id="export-iccids" class="button button-secondary toolbar-button" type="button" disabled
-                    title="导出当前筛选列表中的 ICCID">↓ 导出 ICCID TXT</button>
+            <button id="export-iccids" class="button button-secondary toolbar-button" type="button" disabled>导出 ICCID</button>
           </div>
 
           <div id="progress-panel" class="progress-panel" hidden>
-            <div class="progress-line"><span id="progress-message">准备查询</span><strong id="progress-percent">0%</strong></div>
-            <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+            <div class="progress-info">
+              <span id="progress-message">准备查询</span>
+              <strong id="progress-percent">0%</strong>
+            </div>
+            <div class="progress-track" role="progressbar" aria-label="查询进度">
+              <div id="progress-bar" class="progress-bar"></div>
+            </div>
           </div>
 
-          <div class="table-wrap">
-            <table>
+          <div class="table-scroll">
+            <table class="data-table">
               <thead>
-                <tr><th class="selection-column">选择</th><th>ICCID</th><th>库存 status</th><th>Profile 状态</th><th>更新时间</th><th>查询结果</th></tr>
+                <tr>
+                  <th class="selection-column">选择</th>
+                  <th>ICCID</th>
+                  <th>库存状态</th>
+                  <th>Profile 状态</th>
+                  <th>更新时间</th>
+                  <th>查询结果</th>
+                </tr>
               </thead>
               <tbody id="result-body">
-                <tr class="empty-row"><td colspan="6"><div class="empty-state"><span class="empty-glyph">◌</span><strong>等待查询</strong><span>输入账号后，结果会显示在这里。</span></div></td></tr>
+                <tr class="empty-row">
+                  <td colspan="6">
+                    <div class="empty-state">
+                      <span class="empty-glyph" aria-hidden="true">&#9676;</span>
+                      <strong>等待查询</strong>
+                      <span>查询结果将显示在这里</span>
+                    </div>
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>
 
-          <div class="detail-section">
-            <div class="detail-heading"><span>原始字段</span><span id="detail-label">未选择记录</span></div>
-            <pre id="detail-content">单击一条记录查看平台原始字段。</pre>
+          <div class="detail-panel">
+            <div class="detail-header">
+              <span>原始字段</span>
+              <span id="detail-label">未选择记录</span>
+            </div>
+            <pre id="detail-content" class="detail-content">单击表格行查看完整的平台原始字段。</pre>
           </div>
 
-          <div class="result-footer">
+          <footer class="table-footer">
             <span id="status-message">准备就绪</span>
             <span id="output-paths"></span>
-          </div>
+          </footer>
         </section>
       </section>
     </main>
   </div>
+
+  <aside id="history-panel" class="history-panel" role="dialog" aria-modal="true" aria-labelledby="history-title" hidden>
+    <div class="history-header">
+      <div>
+        <span class="panel-kicker">HISTORY</span>
+        <h2 id="history-title">查询记录</h2>
+      </div>
+      <button id="close-history" class="icon-button" type="button" aria-label="关闭查询记录">&#215;</button>
+    </div>
+    <p class="history-intro">每次查询独立保存；加载不会重新请求后台。删除会同时移除对应 JSON 和 CSV。</p>
+    <div id="history-list" class="history-list">
+      <div class="history-empty">正在读取记录……</div>
+    </div>
+  </aside>
+  <button id="history-overlay" class="history-overlay" type="button" aria-label="关闭查询记录" hidden></button>
+
   <script src="/app.js" defer></script>
 </body>
 </html>

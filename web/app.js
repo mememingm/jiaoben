@@ -17,6 +17,7 @@ const form = $("query-form");
 const username = $("username");
 const password = $("password");
 const baseUrl = $("base-url");
+const iccidField = $("iccid-field");
 const iccids = $("iccids");
 const queryButton = $("query-button");
 const cancelButton = $("cancel-button");
@@ -24,6 +25,7 @@ const loadHistoryButton = $("load-history");
 const historyPanel = $("history-panel");
 const closeHistoryButton = $("close-history");
 const historyList = $("history-list");
+const historyOverlay = $("history-overlay");
 const progressPanel = $("progress-panel");
 const progressBar = $("progress-bar");
 const progressMessage = $("progress-message");
@@ -45,8 +47,10 @@ const batchResult = $("batch-result");
 
 document.querySelectorAll('input[name="scope"]').forEach((radio) => {
   radio.addEventListener("change", () => {
-    iccids.disabled = radio.value !== "selected";
-    if (radio.value === "selected") iccids.focus();
+    const selected = radio.value === "selected";
+    iccidField.hidden = !selected;
+    iccids.disabled = !selected;
+    if (selected) iccids.focus();
   });
 });
 search.addEventListener("input", renderRows);
@@ -55,7 +59,11 @@ exportIccids.addEventListener("click", exportCurrentIccids);
 form.addEventListener("submit", startQuery);
 cancelButton.addEventListener("click", cancelQuery);
 loadHistoryButton.addEventListener("click", loadLatestHistory);
-closeHistoryButton.addEventListener("click", () => { historyPanel.hidden = true; });
+closeHistoryButton.addEventListener("click", closeHistory);
+historyOverlay.addEventListener("click", closeHistory);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !historyPanel.hidden) closeHistory();
+});
 batchTarget.addEventListener("input", updateBatchControls);
 selectReleasedButton.addEventListener("click", selectReleasedRows);
 clearSelectionButton.addEventListener("click", clearSelection);
@@ -155,8 +163,21 @@ async function cancelQuery() {
 
 async function loadLatestHistory() {
   if (state.jobId || state.loadingHistory) return;
-  historyPanel.hidden = false;
+  setHistoryOpen(true);
   await loadHistoryIndex();
+}
+
+function setHistoryOpen(open) {
+  historyPanel.hidden = !open;
+  historyOverlay.hidden = !open;
+  loadHistoryButton.setAttribute("aria-expanded", String(open));
+  if (open) closeHistoryButton.focus();
+}
+
+function closeHistory() {
+  if (historyPanel.hidden) return;
+  setHistoryOpen(false);
+  loadHistoryButton.focus();
 }
 
 async function loadHistoryIndex() {
@@ -252,7 +273,7 @@ async function loadHistory(filename) {
     $("status-message").textContent = queriedAt
       ? `已加载查询记录（账号：${accountLabel}；查询时间：${queriedAt}）。`
       : `已加载查询记录（账号：${accountLabel}）。`;
-    historyPanel.hidden = true;
+    closeHistory();
   } catch (error) {
     setProgress(0, "历史记录未加载");
     setFormMessage(error.message === "还没有保存的历史记录。"
