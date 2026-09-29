@@ -6,16 +6,18 @@ unless an authenticated reverse proxy is placed in front of it.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import sys
 import threading
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import nexsim_status_checker as checker
 import nexsim_profile_writer as writer
@@ -89,7 +91,7 @@ class JobManager:
             "output_dir": str(self.output_dir),
             "page_size": 100,
             "profile_workers": self.profile_workers,
-            "query_params": {"simType": "ESIM"},
+            "query_params": {"simType": "ESIM", "status": "USED"},
         }, require_credential_file=False)
 
         job_id = uuid.uuid4().hex
@@ -231,17 +233,20 @@ class JobManager:
                 rows = payload.get("records", [])
                 if not isinstance(rows, list):
                     continue
-                summary = checker.build_profile_query_summary(rows)
+                used_rows = [
+                    row for row in rows
+                    if isinstance(row, dict) and row.get("status") == "USED"
+                ]
+                summary = checker.build_profile_query_summary(used_rows)
                 statuses: dict[str, int] = {}
-                for row in rows:
-                    if isinstance(row, dict):
-                        status = str(row.get("esimProfileStatus", "failed"))
-                        statuses[status] = statuses.get(status, 0) + 1
+                for row in used_rows:
+                    status = str(row.get("esimProfileStatus", "failed"))
+                    statuses[status] = statuses.get(status, 0) + 1
                 items.append({
                     "filename": path.name,
                     "account": str(payload.get("account") or "未知账号（旧记录）"),
                     "queried_at": payload.get("queried_at", ""),
-                    "count": len(rows),
+                    "count": len(used_rows),
                     "statuses": statuses,
                     "profile_query_summary": summary,
                 })
@@ -263,10 +268,13 @@ class JobManager:
             return None
         if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
             return None
+        used_rows = [
+            row for row in payload["records"]
+            if isinstance(row, dict) and row.get("status") == "USED"
+        ]
+        payload["records"] = used_rows
         payload["account"] = str(payload.get("account") or "未知账号（旧记录）")
-        payload["profile_query_summary"] = checker.build_profile_query_summary(
-            payload["records"]
-        )
+        payload["profile_query_summary"] = checker.build_profile_query_summary(used_rows)
         payload["history_filename"] = path.name
         payload["json_path"] = str(path)
         payload["csv_path"] = str(path.with_suffix(".csv"))
@@ -483,6 +491,46 @@ class WriteBatchManager:
                 raise checker.Stop("二维码文件无法读取。") from exc
         return None
 
+    def qr_batch_zip(self, batch_id: str) -> bytes | None:
+        """将批次中所有已保存的二维码打包成ZIP文件。"""
+        batch = self.snapshot(batch_id)
+        if batch is None:
+            return None
+
+        root = (self.batch_dir / batch_id).resolve()
+        saved_records = [
+            record for record in batch.get("records", [])
+            if record.get("qr_status") == "saved"
+        ]
+
+        if not saved_records:
+            raise checker.Stop("该批次没有已保存的二维码。")
+
+        # 创建内存中的ZIP文件
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for record in saved_records:
+                path_value = record.get("qr_path")
+                if not isinstance(path_value, str) or not path_value:
+                    continue
+
+                path = Path(path_value).resolve()
+                if root not in path.parents or path.suffix.lower() != ".png":
+                    continue
+
+                try:
+                    if path.is_file():
+                        # 使用 sequence-iccid.png 作为ZIP内的文件名
+                        iccid = record.get("iccid", "unknown")
+                        sequence = record.get("sequence", 0)
+                        zip_filename = f"{sequence:03d}-{iccid}.png"
+                        zip_file.writestr(zip_filename, path.read_bytes())
+                except OSError:
+                    continue
+
+        zip_buffer.seek(0)
+        return zip_buffer.read()
+
 
 class ActivationJobManager:
     """异步执行一次性 LPA/二维码获取，不重试单张请求。"""
@@ -586,6 +634,85 @@ class ActivationJobManager:
             return {key: value for key, value in job.items() if key not in {"cancel", "credentials"}}
 
 
+class PlatformContextJobManager:
+    """Identify the authenticated organization and list activation products."""
+
+    def __init__(self):
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.lock = threading.Lock()
+
+    def start(self, payload: dict[str, Any]) -> str:
+        username = str(payload.get("username", "")).strip()
+        password = payload.get("password")
+        if not username or not isinstance(password, str) or not password:
+            raise checker.Stop("识别平台账号需要账号和密码。")
+        job_id = "pc-" + uuid.uuid4().hex
+        job = {
+            "id": job_id,
+            "state": "running",
+            "progress": 0,
+            "stage": "login",
+            "message": "正在登录并识别账号组织……",
+            "result": {},
+            "error": "",
+            "credentials": (username, password),
+            "base_url": str(payload.get("base_url") or "https://admin.nexsimus.com").strip(),
+        }
+        with self.lock:
+            self.jobs[job_id] = job
+        threading.Thread(
+            target=self._run,
+            args=(job_id,),
+            daemon=True,
+            name=f"platform-context-{job_id[:8]}",
+        ).start()
+        return job_id
+
+    def _run(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+        try:
+            with self.lock:
+                job.update(progress=20, message="正在登录平台……")
+            client = platform_activation.PlatformClient(
+                job["base_url"], job["credentials"][0], job["credentials"][1]
+            )
+            with self.lock:
+                job.update(progress=65, stage="products", message="正在读取可开户套餐……")
+            products = platform_activation.list_activation_products(client)
+            result = {
+                "org_id": client.org_id,
+                "account": client.account,
+                "base_url": f"https://{urlsplit(client.base).hostname.lower()}",
+                "products": products,
+                "product_catalog_version": 1,
+            }
+            with self.lock:
+                job.update(
+                    state="done",
+                    progress=100,
+                    stage="done",
+                    result=result,
+                    message=f"账号识别完成：组织 {client.org_id}，{len(products)} 个可开户套餐。",
+                )
+        except platform_activation.PlatformActivationStop as exc:
+            with self.lock:
+                job.update(state="failed", stage="blocked", message=str(exc), error=str(exc))
+        except Exception:
+            message = "账号识别任务发生未预期错误。"
+            with self.lock:
+                job.update(state="failed", stage="blocked", message=message, error=message)
+        finally:
+            with self.lock:
+                job["credentials"] = None
+
+    def snapshot(self, job_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return None
+            return {key: value for key, value in job.items() if key != "credentials"}
+
+
 class PlatformInventoryJobManager:
     """Read and classify platform inventory without touching QR data."""
 
@@ -598,10 +725,9 @@ class PlatformInventoryJobManager:
         password = payload.get("password")
         if not username or not isinstance(password, str) or not password:
             raise checker.Stop("读取平台库存需要账号和密码。")
-        org_id = payload.get("org_id")
         product_id = payload.get("product_id")
-        if type(org_id) is not int or org_id <= 0 or type(product_id) is not int or product_id <= 0:
-            raise checker.Stop("组织 ID 和产品 ID 必须是正整数。")
+        if type(product_id) is not int or product_id <= 0:
+            raise checker.Stop("请选择有效的开户套餐。")
         job_id = "pi-" + uuid.uuid4().hex
         job = {
             "id": job_id,
@@ -613,7 +739,6 @@ class PlatformInventoryJobManager:
             "error": "",
             "credentials": (username, password),
             "base_url": str(payload.get("base_url") or "https://admin.nexsimus.com").strip(),
-            "org_id": org_id,
             "product_id": product_id,
         }
         with self.lock:
@@ -635,10 +760,11 @@ class PlatformInventoryJobManager:
 
         try:
             client = platform_activation.PlatformClient(
-                job["base_url"], job["credentials"][0], job["credentials"][1], job["org_id"]
+                job["base_url"], job["credentials"][0], job["credentials"][1]
             )
+            platform_activation.get_activation_product(client, job["product_id"])
             result = platform_batch.inspect_inventory(
-                client, job["org_id"], job["product_id"], progress
+                client, client.org_id, job["product_id"], progress
             )
             with self.lock:
                 job.update(state="done", progress=100, stage="done", result=result,
@@ -718,7 +844,8 @@ class PlatformQrJobManager:
                 job["base_url"], job["credentials"][0], job["credentials"][1], batch["org_id"]
             )
             results = platform_batch.fetch_batch_qr(
-                client, batch, self.output_dir, progress, job["cancel"].is_set
+                client, batch, self.output_dir, progress, job["cancel"].is_set,
+                checkpoint=lambda rows: self.batches.checkpoint_qr(batch["batch_id"], rows),
             )
             public_results: list[dict[str, Any]] = []
             for result in results:
@@ -794,9 +921,12 @@ class PlatformActivationJobManager:
             raise checker.Stop("平台开户批次缺少有效的组织 ID 或产品 ID。")
         if payload.get("org_id") != org_id or payload.get("product_id") != product_id:
             raise checker.Stop("页面中的组织或产品与所选批次不一致；请重新选择批次。")
-        max_total = str(payload.get("max_total", "")).strip()
+        confirmed_total = payload.get("confirmed_total")
+        max_total = str(payload.get("max_total") if payload.get("max_total") is not None else "").strip()
         if action != "verify" and not max_total:
             raise checker.Stop("提交前必须填写本次授权金额上限。")
+        if action == "submit" and confirmed_total is None:
+            raise checker.Stop("请先预检并确认实际总价。")
         artifact_state = platform_activation.activation_artifact_summary(
             self.output_dir, batch_id
         )
@@ -819,6 +949,7 @@ class PlatformActivationJobManager:
             "base_url": base_url,
             "org_id": org_id,
             "product_id": product_id,
+            "confirmed_total": confirmed_total,
             "max_total": max_total,
             "batch": batch,
         }
@@ -853,17 +984,25 @@ class PlatformActivationJobManager:
             if action == "preview":
                 result = platform_activation.preview_activation(
                     client, job["batch"], self.output_dir, job["org_id"], job["product_id"],
-                    job["max_total"], progress,
+                    progress,
+                    max_total=job["max_total"],
                 )
                 self._update(job_id, state="done", progress=100, stage="done",
                              message="预检完成，尚未提交激活。", preview=result, result=result)
             elif action == "submit":
                 result = platform_activation.submit_activation(
                     client, job["batch"], self.output_dir, job["org_id"], job["product_id"],
-                    job["max_total"], progress,
+                    job["confirmed_total"], progress,
+                    max_total=job["max_total"],
                 )
+                try:
+                    result["verification"] = platform_activation.verify_activation(
+                        client, job["batch"], self.output_dir, job["org_id"], job["product_id"], progress,
+                    )
+                except Exception:
+                    result["verification_error"] = "已提交，但激活状态查询未完成；请点击查询激活状态，勿再次提交。"
                 self._update(job_id, state="done", progress=100, stage="done",
-                             message="激活提交结束，请执行结果核验。", result=result)
+                             message="激活提交阶段结束，请查看逐卡激活状态。", result=result)
             else:
                 result = platform_activation.verify_activation(
                     client, job["batch"], self.output_dir, job["org_id"], job["product_id"], progress,
@@ -895,6 +1034,7 @@ class Handler(BaseHTTPRequestHandler):
     manager: JobManager
     write_batches: WriteBatchManager
     activation_jobs: ActivationJobManager
+    platform_context_jobs: PlatformContextJobManager
     platform_inventory_jobs: PlatformInventoryJobManager
     platform_batches: platform_batch.PlatformBatchStore
     platform_qr_jobs: PlatformQrJobManager
@@ -902,7 +1042,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         # Do not log request bodies, credentials, or query results.
-        print(f"{self.address_string()} - {format % args}")
+        message = re.sub(r"\?[^\s\"]+", "", format % args)
+        print(f"{self.address_string()} - {message}")
 
     def _json(self, value: Any, status: int = 200) -> None:
         data = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -928,6 +1069,42 @@ class Handler(BaseHTTPRequestHandler):
             raise checker.Stop("请求体必须是 JSON 对象。")
         return value
 
+    def _batch_owner(self) -> dict[str, Any]:
+        context_id = self.headers.get("X-Platform-Context") or parse_qs(
+            urlsplit(self.path).query
+        ).get("context_id", [""])[0]
+        context = self.platform_context_jobs.snapshot(context_id)
+        if not context or context.get("state") != "done":
+            raise platform_batch.PlatformBatchStop("请先识别账号；服务重启后需要重新识别。")
+        result = context["result"]
+        return {
+            "base_url": result["base_url"],
+            "org_id": result["org_id"],
+            "username": result["account"]["username"],
+        }
+
+    @staticmethod
+    def _batch_history_view(batch: dict[str, Any]) -> dict[str, Any]:
+        # History never returns LPA, image contents, or an image URL.
+        fields = {"sequence", "inventory_id", "iccid", "state", "fetched_at", "lpa_status",
+                  "qr_status", "qr_sha256", "qr_view_count_before", "qr_view_limit", "error"}
+        view = {key: batch[key] for key in (
+            "batch_id", "owner", "created_at", "updated_at", "finished_at", "org_id", "product_id",
+            "count", "state", "stage", "qr_operations", "qr_result_summary", "qr_error",
+            "csv_download", "platform_activation"
+        ) if key in batch}
+        view["records"] = [{key: value for key, value in record.items() if key in fields}
+                           for record in batch.get("records", [])]
+        return view
+
+    def _batch_action_payload(self) -> dict[str, Any]:
+        payload = self._read_json()
+        owner = self._batch_owner()
+        batch = self.platform_batches.snapshot(str(payload.get("batch_id") or ""))
+        if not batch or batch.get("owner") != owner:
+            raise platform_batch.PlatformBatchStop("当前账号不能操作此批次；旧记录仅供查看。")
+        return payload
+
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         if path == "/api/health":
@@ -940,7 +1117,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"items": self.write_batches.index()})
             return
         if path == "/api/platform-batches":
-            self._json({"items": self.platform_batches.index()})
+            try:
+                self._json({"items": self.platform_batches.index(self._batch_owner())})
+            except platform_batch.PlatformBatchStop as exc:
+                self._json({"error": str(exc)}, 403)
             return
         if path == "/api/history/latest":
             payload = self.manager.load_history()
@@ -970,6 +1150,14 @@ class Handler(BaseHTTPRequestHandler):
             snapshot = self.activation_jobs.snapshot(job_id)
             if snapshot is None:
                 self._json({"error": "激活数据任务不存在。"}, 404)
+            else:
+                self._json(snapshot)
+            return
+        if path.startswith("/api/platform-context-jobs/"):
+            job_id = path.removeprefix("/api/platform-context-jobs/").strip("/")
+            snapshot = self.platform_context_jobs.snapshot(job_id)
+            if snapshot is None:
+                self._json({"error": "平台账号识别任务不存在。"}, 404)
             else:
                 self._json(snapshot)
             return
@@ -1026,6 +1214,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            # 批量下载所有二维码为ZIP
+            if suffix.endswith("/qr/download-all.zip"):
+                batch_id = suffix.removesuffix("/qr/download-all.zip").strip("/")
+                try:
+                    data = self.write_batches.qr_batch_zip(batch_id)
+                except checker.Stop as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                if data is None:
+                    self._json({"error": "批次不存在或没有二维码。"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", f'attachment; filename="{batch_id}-qrcodes.zip"')
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             qr_match = re.fullmatch(r"([^/]+)/qr/([1-9][0-9]{0,2})", suffix)
             if qr_match:
                 batch_id, sequence_text = qr_match.groups()
@@ -1075,6 +1283,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/platform-batches/"):
             suffix = path.removeprefix("/api/platform-batches/").strip("/")
+            # Keep the existing explicit QR route unchanged; metadata/CSV require account context.
+            if "/qr/" not in suffix:
+                try:
+                    owner = self._batch_owner()
+                    batch = self.platform_batches.history_snapshot(suffix.split("/")[0])
+                    if batch is None or not self.platform_batches.belongs_to(batch, owner):
+                        self._json({"error": "当前账号没有这个批次记录。"}, 404)
+                        return
+                except platform_batch.PlatformBatchStop as exc:
+                    self._json({"error": str(exc)}, 403)
+                    return
             activation_artifact_match = re.fullmatch(
                 r"([^/]+)/platform-activation/(verification\.csv)", suffix
             )
@@ -1096,6 +1315,46 @@ class Handler(BaseHTTPRequestHandler):
                     "Content-Disposition",
                     f'attachment; filename="{batch_id}-platform-verification.csv"',
                 )
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            # 批量下载所有LPA为文本文件
+            if suffix.endswith("/lpa/download-all.txt"):
+                batch_id = suffix.removesuffix("/lpa/download-all.txt").strip("/")
+                try:
+                    data = self.platform_batches.lpa_batch_file(batch_id)
+                except platform_batch.PlatformBatchStop as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                if data is None:
+                    self._json({"error": "批次不存在或没有LPA记录。"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{batch_id}-lpa-codes.txt"')
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            # 批量下载所有二维码为ZIP
+            if suffix.endswith("/qr/download-all.zip"):
+                batch_id = suffix.removesuffix("/qr/download-all.zip").strip("/")
+                try:
+                    data = self.platform_batches.qr_batch_zip(batch_id)
+                except platform_batch.PlatformBatchStop as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                if data is None:
+                    self._json({"error": "批次不存在或没有二维码。"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", f'attachment; filename="{batch_id}-qrcodes.zip"')
                 self.send_header("Cache-Control", "private, no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(data)))
@@ -1141,14 +1400,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             batch_id = suffix
             try:
-                snapshot = self.platform_batches.snapshot(batch_id)
+                snapshot = self.platform_batches.history_snapshot(batch_id)
             except platform_batch.PlatformBatchStop as exc:
                 self._json({"error": str(exc)}, 400)
                 return
             if snapshot is None:
                 self._json({"error": "平台开户批次不存在。"}, 404)
             else:
-                self._json(snapshot)
+                self._json(self._batch_history_view(snapshot))
             return
         self._serve_static(path)
 
@@ -1200,16 +1459,25 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = self.activation_jobs.start(self._read_json())
                 self._json({"job_id": job_id}, 202)
                 return
+            if path == "/api/platform-context-jobs":
+                job_id = self.platform_context_jobs.start(self._read_json())
+                self._json({"job_id": job_id}, 202)
+                return
             if path == "/api/platform-inventory-jobs":
                 job_id = self.platform_inventory_jobs.start(self._read_json())
                 self._json({"job_id": job_id}, 202)
                 return
             if path == "/api/platform-batches":
-                batch = self.platform_batches.create(self._read_json())
+                payload = self._read_json()
+                owner = self._batch_owner()
+                if payload.get("org_id") != owner["org_id"]:
+                    raise platform_batch.PlatformBatchStop("批次组织与已识别账号不一致。")
+                payload["owner"] = owner
+                batch = self.platform_batches.create(payload)
                 self._json({key: value for key, value in batch.items() if key != "records"}, 201)
                 return
             if path == "/api/platform-qr-jobs":
-                job_id = self.platform_qr_jobs.start(self._read_json())
+                job_id = self.platform_qr_jobs.start(self._batch_action_payload())
                 self._json({"job_id": job_id}, 202)
                 return
             if path in {
@@ -1218,7 +1486,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/platform-activation/verify",
             }:
                 action = path.rsplit("/", 1)[-1]
-                job_id = self.platform_activation_jobs.start(self._read_json(), action)
+                job_id = self.platform_activation_jobs.start(self._batch_action_payload(), action)
                 self._json({"job_id": job_id}, 202)
                 return
             if path.startswith("/api/activation-jobs/") and path.endswith("/cancel"):
@@ -1266,6 +1534,7 @@ def main(argv: list[str] | None = None) -> int:
     manager = JobManager(output_dir, args.profile_workers)
     write_batches = WriteBatchManager(output_dir)
     activation_jobs = ActivationJobManager(write_batches, output_dir)
+    platform_context_jobs = PlatformContextJobManager()
     platform_inventory_jobs = PlatformInventoryJobManager()
     platform_batches = platform_batch.PlatformBatchStore(output_dir)
     platform_qr_jobs = PlatformQrJobManager(platform_batches, output_dir)
@@ -1273,6 +1542,7 @@ def main(argv: list[str] | None = None) -> int:
     Handler.manager = manager
     Handler.write_batches = write_batches
     Handler.activation_jobs = activation_jobs
+    Handler.platform_context_jobs = platform_context_jobs
     Handler.platform_inventory_jobs = platform_inventory_jobs
     Handler.platform_batches = platform_batches
     Handler.platform_qr_jobs = platform_qr_jobs

@@ -119,12 +119,16 @@ def validate_config(config: dict[str, Any], *, require_credential_file: bool) ->
     page_size = config.get("page_size", 100)
     if type(page_size) is not int or not 1 <= page_size <= 100:
         raise Stop("page_size 必须是 1—100。")
-    profile_workers = config.get("profile_workers", 8)
+    profile_workers = config.get("profile_workers", 2)
     if type(profile_workers) is not int or not 1 <= profile_workers <= 16:
         raise Stop("profile_workers 必须是 1—16。")
-    query_params = config.get("query_params", {"simType": "ESIM"})
+    query_params = config.get("query_params", {})
     if not isinstance(query_params, dict):
         raise Stop("query_params 必须是 JSON 对象。")
+    query_params = dict(query_params)
+    # Profile 核验只面向已成功开卡的 eSIM；可开户库存由独立的 ALLOCATED 流程处理。
+    query_params["simType"] = "ESIM"
+    query_params["status"] = "USED"
     config["base_url"] = base
     config["page_size"] = page_size
     config["profile_workers"] = profile_workers
@@ -305,7 +309,7 @@ def enrich_profile_status(
     rows: list[dict[str, Any]],
     progress: ProgressCallback | None = None,
     cancelled: CancelCallback | None = None,
-    workers: int = 8,
+    workers: int = 2,
 ) -> None:
     """用专用只读接口补充每条记录的 Profile 状态。"""
     total = len(rows)
@@ -424,7 +428,10 @@ def fetch_rows(
             break
         page_no += 1
     filtered = []
+    required_status = config["query_params"]["status"]
     for row in rows:
+        if row.get("status") != required_status:
+            continue
         if row.get("ownerOrgId") not in (None, config["org_id"]):
             continue
         if config.get("product_id") is not None and row.get("productId") not in (None, config["product_id"]):
@@ -438,7 +445,7 @@ def fetch_rows(
     if len(seen) != len(set(seen)):
         raise Stop("状态查询结果包含重复 ICCID。")
     enrich_profile_status(client, filtered, progress, cancelled,
-                          workers=config.get("profile_workers", 8))
+                          workers=config.get("profile_workers", 2))
     return filtered
 
 
@@ -559,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default="nexsim-status.json")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("gui", help="打开可视化界面")
-    status = sub.add_parser("status", help="只读查询 eSIM 原始库存状态")
+    status = sub.add_parser("status", help="只读查询 USED 卡的 eSIM Profile 状态")
     status.add_argument("--iccid-file", type=Path, help="可选，ICCID 单列 CSV")
     args = parser.parse_args(argv)
     try:

@@ -4,17 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>eSIM Profile Manager</title>
+  <title>已开卡 eSIM 状态核验</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="app-container">
     <header class="top-nav">
-      <a class="nav-brand" href="/" aria-label="eSIM Profile Manager 首页">
+      <a class="nav-brand" href="/" aria-label="已开卡 eSIM 状态核验首页">
         <span class="brand-mark" aria-hidden="true"><span></span></span>
         <span class="brand-copy">
-          <strong>eSIM Profile Manager</strong>
-          <span>NexSim status console</span>
+          <strong>已开卡 eSIM 状态核验</strong>
+          <span>NexSim Profile Status</span>
         </span>
       </a>
       <div class="nav-actions">
@@ -68,7 +68,7 @@
               <div class="segmented-control">
                 <label>
                   <input type="radio" name="scope" value="all" checked>
-                  <span>全部 eSIM</span>
+                  <span>全部已开卡 eSIM</span>
                 </label>
                 <label>
                   <input type="radio" name="scope" value="selected">
@@ -97,7 +97,7 @@
           <span class="safety-check" aria-hidden="true">&#10003;</span>
           <div>
             <strong>请求范围已锁定</strong>
-            <p>本页只查询 eSIM Profile 状态。平台库存、二维码和开户激活请前往独立的“平台开户”页面。</p>
+            <p>本页只读取平台状态为 USED 的已开卡记录，并查询对应的 eSIM Profile 状态。</p>
           </div>
         </section>
       </aside>
@@ -105,18 +105,24 @@
       <section class="data-panel" aria-label="Profile 查询结果">
         <section class="metrics-grid" aria-label="状态统计">
           <article class="metric-card metric-total">
-            <span>全部记录</span>
+            <span>Profile 查询卡数</span>
             <strong id="metric-total">0</strong>
+            <small>USED 范围</small>
           </article>
           <article class="metric-card metric-installed">
-            <span>本轮查到已安装</span>
+            <span>已经写入</span>
             <strong id="metric-installed">0</strong>
             <small>INSTALLED</small>
           </article>
           <article class="metric-card metric-released">
-            <span>本轮查到待下载</span>
+            <span>尚未写入</span>
             <strong id="metric-released">0</strong>
             <small>RELEASED</small>
+          </article>
+          <article class="metric-card metric-error">
+            <span>Profile 异常</span>
+            <strong id="metric-error">0</strong>
+            <small>ERROR / OTHER</small>
           </article>
           <article class="metric-card metric-failed">
             <span>查询失败</span>
@@ -136,7 +142,7 @@
           <div class="table-header">
             <div>
               <span class="panel-kicker">RESULTS</span>
-              <h2>Profile 状态明细</h2>
+              <h2>USED 卡 Profile 状态明细</h2>
             </div>
             <div class="table-meta">
               <span id="history-account" class="history-tag" hidden></span>
@@ -151,9 +157,10 @@
               <input id="search" type="search" placeholder="搜索 ICCID 或原始字段">
             </label>
             <select id="status-filter" aria-label="按 Profile 状态筛选">
-              <option value="all">全部状态</option>
-              <option value="INSTALLED">已安装（INSTALLED）</option>
-              <option value="RELEASED">已释放待下载（RELEASED）</option>
+              <option value="all">全部 eSIM 状态</option>
+              <option value="INSTALLED">已写入（INSTALLED）</option>
+              <option value="RELEASED">未写入（RELEASED）</option>
+              <option value="issue">Profile 异常</option>
               <option value="failed">查询失败</option>
             </select>
             <button id="export-iccids" class="button button-secondary toolbar-button" type="button" disabled>导出 ICCID</button>
@@ -174,15 +181,16 @@
               <thead>
                 <tr>
                   <th>ICCID</th>
-                  <th>库存状态</th>
                   <th>Profile 状态</th>
-                  <th>更新时间</th>
+                  <th>写入判断</th>
+                  <th>状态更新时间</th>
                   <th>查询结果</th>
+                  <th>尝试次数</th>
                 </tr>
               </thead>
               <tbody id="result-body">
                 <tr class="empty-row">
-                  <td colspan="5">
+                  <td colspan="6">
                     <div class="empty-state">
                       <span class="empty-glyph" aria-hidden="true">&#9676;</span>
                       <strong>等待查询</strong>
@@ -196,10 +204,10 @@
 
           <div class="detail-panel">
             <div class="detail-header">
-              <span>原始字段</span>
+              <span>原始接口字段</span>
               <span id="detail-label">未选择记录</span>
             </div>
-            <pre id="detail-content" class="detail-content">单击表格行查看完整的平台原始字段。</pre>
+            <pre id="detail-content" class="detail-content">单击表格行查看完整的原始接口字段。</pre>
           </div>
 
           <footer class="table-footer">

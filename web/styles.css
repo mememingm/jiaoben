@@ -625,7 +625,7 @@ select:disabled {
 
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -679,10 +679,14 @@ select:disabled {
   font-size: 9px;
 }
 
+.metric-total::before { background: var(--blue); }
+.metric-total strong { color: var(--blue); }
 .metric-installed::before { background: var(--green); }
 .metric-installed strong { color: var(--green); }
 .metric-released::before { background: var(--amber); }
 .metric-released strong { color: var(--amber); }
+.metric-error::before { background: var(--red); }
+.metric-error strong { color: var(--red); }
 .metric-failed::before { background: var(--red); }
 .metric-failed strong { color: var(--red); }
 
@@ -880,7 +884,7 @@ select:disabled {
 
 .data-table {
   width: 100%;
-  min-width: 800px;
+  min-width: 940px;
   border-collapse: collapse;
   font-size: 12px;
 }
@@ -945,6 +949,11 @@ select:disabled {
 .status-installed {
   color: var(--green);
   background: var(--green-soft);
+}
+
+.status-used {
+  color: var(--blue);
+  background: var(--blue-soft);
 }
 
 .status-released {
@@ -1307,6 +1316,35 @@ select:disabled {
   grid-column: 1 / -1;
 }
 
+.platform-readonly-value {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  color: var(--text-soft);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font: 12px/1.35 var(--font-mono);
+}
+
+.platform-account-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 12px;
+}
+
+.platform-account-actions .form-message {
+  min-width: 0;
+  margin: 0;
+}
+
+.platform-context-progress {
+  grid-column: 1 / -1;
+}
+
 .platform-credential-note {
   grid-column: 1 / -1;
 }
@@ -1336,6 +1374,10 @@ select:disabled {
 .inventory-toolbar .compact-field {
   width: 128px;
   margin-right: auto;
+}
+
+.inventory-toggle {
+  min-width: 92px;
 }
 
 .inventory-footer {
@@ -1780,7 +1822,8 @@ select:disabled {
   }
 
   .inventory-toolbar,
-  .inventory-footer {
+  .inventory-footer,
+  .platform-account-actions {
     align-items: stretch;
     flex-direction: column;
   }
@@ -1798,6 +1841,35 @@ select:disabled {
   .workflow-step {
     min-height: 74px;
   }
+}
+
+.activation-workflow-help {
+  margin: 0;
+  padding: 16px 24px;
+  line-height: 1.7;
+}
+
+.activation-product-field {
+  min-width: 0;
+}
+
+.activation-product-field select {
+  width: 100%;
+  min-width: 0;
+}
+
+.platform-product-detail {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.activation-check-actions {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 200px));
+}
+
+.activation-result .platform-table-wrap {
+  width: 100%;
+  min-width: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

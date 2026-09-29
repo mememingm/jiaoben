@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -239,12 +240,16 @@ class PlatformBatchStore:
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         org_id = _positive_int(payload.get("org_id"), "组织 ID")
+        owner = payload.get("owner")
+        if not isinstance(owner, dict) or owner.get("org_id") != org_id or not owner.get("username") or not owner.get("base_url"):
+            raise PlatformBatchStop("建立批次前请先识别账号。")
         product_id = _positive_int(payload.get("product_id"), "产品 ID")
         records = _normalize_selected(payload.get("rows"), org_id, product_id)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         batch_id = f"pb-{stamp}-{uuid.uuid4().hex[:8]}"
         batch = {
             "batch_id": batch_id,
+            "owner": {key: owner[key] for key in ("base_url", "org_id", "username")},
             "created_at": now(),
             "source": "platform-inventory",
             "state": "inventory_selected",
@@ -301,19 +306,62 @@ class PlatformBatchStore:
             raise PlatformBatchStop("平台开户批次文件格式异常。")
         return self._decorate(value)
 
-    def index(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def belongs_to(batch: dict[str, Any], owner: dict[str, Any]) -> bool:
+        saved = batch.get("owner")
+        if isinstance(saved, dict):
+            return all(saved.get(key) == owner.get(key) for key in ("base_url", "org_id", "username"))
+        # Old records have no reliable account identity. Show separately, read-only.
+        return (batch.get("org_id") == owner.get("org_id")
+                and owner.get("base_url") == "https://admin.nexsimus.com")
+
+    def history_snapshot(self, batch_id: str) -> dict[str, Any] | None:
+        if batch_id.startswith("pb-"):
+            return self.snapshot(batch_id)
+        if not re.fullmatch(r"wb-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}", batch_id):
+            raise PlatformBatchStop("历史批次编号格式不正确。")
+        path = self.output_dir / "write-batches" / f"{batch_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            batch = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PlatformBatchStop("旧批次记录无法读取。") from exc
+        if not isinstance(batch, dict) or not isinstance(batch.get("records"), list):
+            raise PlatformBatchStop("旧批次记录格式不正确。")
+        records = batch["records"]
+        if not records or not all(isinstance(row, dict) for row in records):
+            return None
+        orgs = {row.get("owner_org_id") for row in records}
+        products = {row.get("product_id") for row in records}
+        if len(orgs) != 1 or not all(type(org) is int and org > 0 for org in orgs):
+            return None  # Cannot attribute this legacy batch safely.
+        batch.update({
+            "batch_id": batch_id, "owner": None, "org_id": orgs.pop(),
+            "product_id": products.pop() if len(products) == 1 else None,
+            "csv_download": f"/api/write-batches/{batch_id}/export.csv",
+            "platform_activation": platform_activation.activation_artifact_summary(self.output_dir, batch_id),
+        })
+        return batch
+
+    def index(self, owner: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        for path in sorted(self.batch_dir.glob("pb-*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        paths = list(self.batch_dir.glob("pb-*.json"))
+        paths.extend((self.output_dir / "write-batches").glob("wb-*.json"))
+        for path in sorted(paths, key=lambda item: item.stat().st_mtime, reverse=True):
             try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                value = self.history_snapshot(path.stem)
+            except (OSError, PlatformBatchStop):
                 continue
             if not isinstance(value, dict):
+                continue
+            if not self.belongs_to(value, owner):
                 continue
             records = value.get("records") if isinstance(value.get("records"), list) else []
             batch_id = path.stem
             items.append({
                 "batch_id": batch_id,
+                "owner": value.get("owner"),
                 "created_at": value.get("created_at", ""),
                 "state": value.get("state", "inventory_selected"),
                 "stage": value.get("stage", "awaiting_qr"),
@@ -348,13 +396,29 @@ class PlatformBatchStore:
                 self.batches[batch_id] = batch
             return batch
 
+    def checkpoint_qr(self, batch_id: str, results: list[dict[str, Any]]) -> None:
+        """Persist only operation metadata, including progress before task completion."""
+        batch = self.snapshot(batch_id)
+        if batch is None:
+            raise PlatformBatchStop("平台开户批次不存在。")
+        by_id = {result.get("inventory_id"): result for result in results}
+        fields = {"state", "fetched_at", "lpa_status", "qr_status", "qr_path", "qr_sha256",
+                  "qr_view_count_before", "qr_view_limit", "error"}
+        for record in batch.get("records", []):
+            result = by_id.get(record.get("inventory_id"), {})
+            record.update({key: value for key, value in result.items() if key in fields})
+        batch["updated_at"] = now()
+        self._persist(batch)
+        with self.lock:
+            self.batches[batch_id] = batch
+
     def finish_qr(self, batch_id: str, results: list[dict[str, Any]]) -> dict[str, int]:
         batch = self.snapshot(batch_id)
         if batch is None:
             raise PlatformBatchStop("平台开户批次不存在。")
         by_id = {result.get("inventory_id"): result for result in results}
         safe_fields = {
-            "fetched_at", "lpa_status", "qr_status", "qr_path", "qr_sha256",
+            "state", "fetched_at", "lpa_status", "qr_status", "qr_path", "qr_sha256",
             "qr_view_count_before", "qr_view_limit", "error",
         }
         for record in batch.get("records", []):
@@ -414,6 +478,92 @@ class PlatformBatchStore:
                 raise PlatformBatchStop("二维码文件无法读取。") from exc
         return None
 
+    def qr_batch_zip(self, batch_id: str) -> bytes | None:
+        """将批次中所有已保存的二维码打包成ZIP文件。"""
+        batch = self.snapshot(batch_id)
+        if batch is None:
+            return None
+
+        root = (self.batch_dir / batch_id / "qr").resolve()
+        saved_records = [
+            record for record in batch.get("records", [])
+            if record.get("qr_status") == "saved"
+        ]
+
+        if not saved_records:
+            raise PlatformBatchStop("该批次没有已保存的二维码。")
+
+        # 创建内存中的ZIP文件
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for record in saved_records:
+                path = Path(str(record.get("qr_path") or "")).resolve()
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    continue
+
+                try:
+                    if path.is_file() and path.suffix.lower() == ".png":
+                        # 使用 sequence-iccid.png 作为ZIP内的文件名
+                        iccid = record.get("iccid", "unknown")
+                        sequence = record.get("sequence", 0)
+                        zip_filename = f"{sequence:03d}-{iccid}.png"
+                        zip_file.writestr(zip_filename, path.read_bytes())
+                except OSError:
+                    continue
+
+        zip_buffer.seek(0)
+        return zip_buffer.read()
+
+    def lpa_batch_file(self, batch_id: str) -> bytes | None:
+        """生成包含所有已保存LPA的文本文件。"""
+        batch = self.snapshot(batch_id)
+        if batch is None:
+            return None
+
+        # 兼容旧数据：同时支持 lpa_status="saved" 和 "memory_only"
+        saved_records = [
+            record for record in batch.get("records", [])
+            if record.get("lpa_status") in ("saved", "memory_only") or record.get("activation_code")
+        ]
+
+        if not saved_records:
+            raise PlatformBatchStop("该批次没有已保存的LPA记录。")
+
+        # 生成LPA列表文本文件
+        lines = [f"# 批次 {batch_id} LPA 记录"]
+        lines.append(f"# 生成时间: {now()}")
+        lines.append(f"# 总计: {len(saved_records)} 条记录")
+        lines.append("")
+
+        for record in saved_records:
+            sequence = record.get("sequence", 0)
+            iccid = record.get("iccid", "unknown")
+            lpa_path = record.get("lpa_path")
+            activation_code = record.get("activation_code")
+
+            lpa_code = None
+
+            # 优先从文件读取
+            if lpa_path and Path(lpa_path).is_file():
+                try:
+                    lpa_code = Path(lpa_path).read_text(encoding="utf-8").strip()
+                except OSError:
+                    pass
+
+            # 如果文件不存在，尝试从内存记录读取（兼容旧数据）
+            if not lpa_code and activation_code:
+                lpa_code = activation_code
+
+            if lpa_code:
+                lines.append(f"# {sequence:03d} - {iccid}")
+                lines.append(lpa_code)
+                lines.append("")
+
+        content = "\n".join(lines)
+        return content.encode("utf-8")
+
 
 def fetch_batch_qr(
     client: platform_activation.PlatformClient,
@@ -421,6 +571,7 @@ def fetch_batch_qr(
     output_dir: Path,
     progress: ProgressCallback | None = None,
     cancelled: Callable[[], bool] | None = None,
+    checkpoint: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch each QR activation code exactly once and never retry unknown calls."""
     batch_id = str(batch.get("batch_id", ""))
@@ -486,6 +637,9 @@ def fetch_batch_qr(
             if qr_path.exists() and qr_path.read_bytes() != blob:
                 raise PlatformBatchStop("已有同名二维码且内容不同，已停止。")
             atomic_write(qr_path, blob)
+            # 同时保存LPA到文本文件
+            lpa_path = qr_dir / f"{index:04d}-{iccid}.txt"
+            atomic_write(lpa_path, activation_code.encode("utf-8"))
             fetched_at = now()
             attempt.update({"state": "saved", "saved_at": fetched_at, "qr_sha256": hashlib.sha256(blob).hexdigest()})
             atomic_write(marker, json.dumps(attempt, ensure_ascii=False, indent=2).encode("utf-8"))
@@ -495,9 +649,10 @@ def fetch_batch_qr(
                 "iccid": iccid,
                 "state": "ready",
                 "fetched_at": fetched_at,
-                "lpa_status": "memory_only",
+                "lpa_status": "saved",
                 "qr_status": "saved",
                 "qr_path": str(qr_path.resolve()),
+                "lpa_path": str(lpa_path.resolve()),
                 "qr_sha256": hashlib.sha256(blob).hexdigest(),
                 "qr_view_count_before": live["qr_view_count"],
                 "qr_view_limit": live["qr_view_limit"],
@@ -523,6 +678,8 @@ def fetch_batch_qr(
                 "state": "failed", "lpa_status": "failed", "qr_status": "failed", "error": str(exc),
             })
             stop_after_current = True
+        if checkpoint:
+            checkpoint(results)
         if progress:
             progress("qr", 5 + index / total * 90, f"二维码处理进度：{index}/{total}")
         time.sleep(0.2)

@@ -24,6 +24,16 @@ import requests
 
 
 MAX_BATCH_SIZE = 200
+# Public ActivationCenterView-BeHu0jFW.js, retrieved 2026-09-29.
+# These are display aliases only; requests must keep the original numeric ID.
+ACTIVATION_DISPLAY_CODES = {
+    "P_VOICE_SMS_30M_100": "P001",
+    "P_VOICE_SMS_1G_30M_100": "P002",
+    "P_ENTITY_003": "P003",
+    "P_REGISTRATION_30D": "P004",
+    "A_SMS_30D": "A001",
+}
+ACTIVATION_DISPLAY_ORDER = {code: index for index, code in enumerate(ACTIVATION_DISPLAY_CODES.values())}
 BATCH_ID_PATTERN = re.compile(r"^(?:wb|pb)-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$")
 ICCID_PATTERN = re.compile(r"^[0-9]{18,22}$")
 ProgressCallback = Callable[[str, float, str], None]
@@ -119,7 +129,13 @@ def _validate_batch_scope(
 class PlatformClient:
     """Authenticated client for platform activation endpoints."""
 
-    def __init__(self, base_url: str, username: str, password: str, expected_org_id: int):
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        password: str,
+        expected_org_id: int | None = None,
+    ):
         self.base = _base_url(base_url)
         username = str(username or "").strip()
         if not username or not isinstance(password, str) or not password:
@@ -145,9 +161,17 @@ class PlatformClient:
         if not isinstance(user, dict) or not token:
             raise PlatformActivationStop("登录响应缺少用户或令牌。")
         org_id = user.get("orgId")
-        if org_id != expected_org_id:
-            raise PlatformActivationStop("登录账号所属组织与填写的组织 ID 不一致。")
-        self.org_id = expected_org_id
+        if type(org_id) is not int or org_id <= 0:
+            raise PlatformActivationStop("登录响应缺少有效的组织 ID。")
+        if expected_org_id is not None:
+            expected_org_id = _positive_int(expected_org_id, "批次组织 ID")
+            if org_id != expected_org_id:
+                raise PlatformActivationStop("登录账号所属组织与批次组织不一致。")
+        self.org_id = org_id
+        self.account = {
+            "username": str(user.get("username") or username),
+            "display_name": str(user.get("displayName") or ""),
+        }
         self.session.headers["Authorization"] = "Bearer " + str(token)
 
     @staticmethod
@@ -271,6 +295,59 @@ def list_inventory(client: PlatformClient) -> list[dict[str, Any]]:
     })
 
 
+def list_activation_products(client: PlatformClient) -> list[dict[str, Any]]:
+    """Return normalized activation products for the authenticated organization."""
+    products = client.get(
+        "/api/products",
+        {"orgId": client.org_id, "operationType": "ACTIVATION"},
+    )
+    if not isinstance(products, list):
+        raise PlatformActivationStop("产品列表响应格式不正确。")
+    normalized: list[dict[str, Any]] = []
+    product_ids: set[int] = set()
+    for product in products:
+        if not isinstance(product, dict):
+            raise PlatformActivationStop("产品列表包含无效记录。")
+        product_id = product.get("id")
+        if type(product_id) is not int or product_id <= 0 or product_id in product_ids:
+            raise PlatformActivationStop("产品列表包含无效或重复的产品 ID。")
+        product_ids.add(product_id)
+        # Match the platform activation screen, not the full product catalog.
+        if (product.get("cardCategory") not in {"P_CARD", "A_CARD"}
+                or product.get("productPurpose") != "BASE_PLAN"
+                or type(product.get("activationEnabled")) is not int
+                or product["activationEnabled"] != 1):
+            continue
+        product_code = str(product.get("productCode") or "").strip()
+        normalized.append({
+            "id": product_id,
+            "product_code": product_code,
+            "display_code": ACTIVATION_DISPLAY_CODES.get(product_code.upper(), ""),
+            "product_name": str(product.get("productName") or product.get("name") or ""),
+            "package_spec": str(product.get("packageSpec") or ""),
+            "card_category": product["cardCategory"],
+            "activation_supported": product["cardCategory"] == "P_CARD",
+            "display_price": (
+                str(product["displayPrice"])
+                if product.get("displayPrice") is not None else ""
+            ),
+        })
+    return sorted(normalized, key=lambda product: ACTIVATION_DISPLAY_ORDER.get(product["display_code"], 999))
+
+
+def get_activation_product(client: PlatformClient, product_id: int) -> dict[str, Any]:
+    product_id = _positive_int(product_id, "产品 ID")
+    matches = [
+        product for product in list_activation_products(client)
+        if product["id"] == product_id
+    ]
+    if len(matches) != 1:
+        raise PlatformActivationStop("所选套餐不在当前账号的可开户套餐列表中。")
+    if not matches[0]["activation_supported"]:
+        raise PlatformActivationStop("当前工具仅支持 P 类库存开户，暂不支持 A 卡套餐。")
+    return matches[0]
+
+
 def batch_directory(output_dir: Path, batch_id: str) -> Path:
     if not BATCH_ID_PATTERN.fullmatch(batch_id):
         raise PlatformActivationStop("批次编号格式不正确。")
@@ -283,7 +360,7 @@ def _verification_url(batch_id: str) -> str:
     return f"/api/{route}/{batch_id}/platform-activation/verification.csv"
 
 
-def _batch_records(batch: dict[str, Any], output_dir: Path) -> tuple[str, list[dict[str, Any]]]:
+def _batch_records(batch: dict[str, Any], output_dir: Path, *, require_qr: bool = True) -> tuple[str, list[dict[str, Any]]]:
     batch_id = str(batch.get("batch_id", ""))
     if not BATCH_ID_PATTERN.fullmatch(batch_id):
         raise PlatformActivationStop("写卡批次编号格式不正确。")
@@ -303,20 +380,8 @@ def _batch_records(batch: dict[str, Any], output_dir: Path) -> tuple[str, list[d
             raise PlatformActivationStop("写卡批次包含无效 ICCID。")
         if inventory_id in inventory_ids or iccid in iccids:
             raise PlatformActivationStop("写卡批次包含重复库存 ID 或 ICCID。")
-        if record.get("qr_status") != "saved":
-            raise PlatformActivationStop(f"ICCID {iccid} 尚未完成二维码准备。")
-        qr_path = Path(str(record.get("qr_path", ""))).resolve()
-        try:
-            qr_path.relative_to(expected_qr_dir)
-        except ValueError as exc:
-            raise PlatformActivationStop(f"ICCID {iccid} 的二维码路径超出批次目录。") from exc
-        if not qr_path.is_file():
-            raise PlatformActivationStop(f"ICCID {iccid} 的二维码文件不存在。")
-        expected_hash = str(record.get("qr_sha256", ""))
-        if not re.fullmatch(r"[a-f0-9]{64}", expected_hash):
-            raise PlatformActivationStop(f"ICCID {iccid} 的二维码摘要无效。")
-        if hashlib.sha256(qr_path.read_bytes()).hexdigest() != expected_hash:
-            raise PlatformActivationStop(f"ICCID {iccid} 的二维码文件校验失败。")
+        if require_qr:
+            _validate_saved_qr(record, expected_qr_dir, iccid)
         inventory_ids.add(inventory_id)
         iccids.add(iccid)
         normalized.append({
@@ -327,14 +392,33 @@ def _batch_records(batch: dict[str, Any], output_dir: Path) -> tuple[str, list[d
     return batch_id, normalized
 
 
+def _validate_saved_qr(record: dict[str, Any], expected_qr_dir: Path, iccid: str) -> None:
+    if record.get("qr_status") != "saved":
+        raise PlatformActivationStop(f"ICCID {iccid} 尚未完成二维码准备。")
+    qr_path = Path(str(record.get("qr_path", ""))).resolve()
+    try:
+        qr_path.relative_to(expected_qr_dir)
+    except ValueError as exc:
+        raise PlatformActivationStop(f"ICCID {iccid} 的二维码路径超出批次目录。") from exc
+    if not qr_path.is_file():
+        raise PlatformActivationStop(f"ICCID {iccid} 的二维码文件不存在。")
+    expected_hash = str(record.get("qr_sha256", ""))
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_hash):
+        raise PlatformActivationStop(f"ICCID {iccid} 的二维码摘要无效。")
+    if hashlib.sha256(qr_path.read_bytes()).hexdigest() != expected_hash:
+        raise PlatformActivationStop(f"ICCID {iccid} 的二维码文件校验失败。")
+
+
 def _product(client: PlatformClient, org_id: int, product_id: int) -> dict[str, Any]:
-    products = client.get("/api/products", {"orgId": org_id, "operationType": "ACTIVATION"})
-    if not isinstance(products, list):
-        raise PlatformActivationStop("产品列表响应格式不正确。")
-    matches = [item for item in products if isinstance(item, dict) and item.get("id") == product_id]
-    if len(matches) != 1:
-        raise PlatformActivationStop("指定产品不在当前组织的激活产品列表中。")
-    return matches[0]
+    if org_id != client.org_id:
+        raise PlatformActivationStop("登录账号所属组织与批次组织不一致。")
+    product = get_activation_product(client, product_id)
+    return {
+        "id": product["id"],
+        "productCode": product["product_code"],
+        "productName": product["product_name"],
+        "displayPrice": product["display_price"],
+    }
 
 
 def _activation_balance(client: PlatformClient, org_id: int) -> Decimal:
@@ -353,8 +437,9 @@ def preview_activation(
     output_dir: Path,
     org_id: int,
     product_id: int,
-    max_total: Any,
     progress: ProgressCallback | None = None,
+    *,
+    max_total: Any = None,
 ) -> dict[str, Any]:
     """Perform read-only eligibility, duplicate-order, product, and balance checks."""
     org_id = _positive_int(org_id, "组织 ID")
@@ -431,8 +516,22 @@ def activation_artifact_summary(output_dir: Path, batch_id: str) -> dict[str, An
     has_response = (directory / "response.json").is_file()
     has_unknown = (directory / "unknown.json").is_file()
     has_verification = (directory / "verification.csv").is_file()
-    if has_verification:
-        state = "verified"
+    verification = None
+    try:
+        saved = json.loads((directory / "verification-result.json").read_text(encoding="utf-8"))
+        if isinstance(saved, dict) and saved.get("batch_id") == batch_id and isinstance(saved.get("rows"), list):
+            rows = saved["rows"]
+            if 1 <= len(rows) <= MAX_BATCH_SIZE and all(isinstance(row, dict) for row in rows):
+                verification = {key: saved.get(key) for key in ("batch_id", "checked_at", "rows")}
+                verification.update(count=len(rows), confirmed=sum(row.get("state") == "verified" for row in rows))
+                verification["all_confirmed"] = verification["confirmed"] == len(rows)
+                verification["verification_csv_url"] = _verification_url(batch_id) if has_verification else ""
+    except (OSError, ValueError):
+        pass  # Legacy CSV-only or unreadable results cannot prove success.
+    if verification:
+        state = "verified" if verification["all_confirmed"] else "unconfirmed"
+    elif has_verification:
+        state = "checked"
     elif has_unknown:
         state = "unknown"
     elif has_response:
@@ -445,6 +544,7 @@ def activation_artifact_summary(output_dir: Path, batch_id: str) -> dict[str, An
         "state": state,
         "has_submission_intent": has_intent,
         "has_verification": has_verification,
+        "verification": verification,
         "verification_csv_url": (
             _verification_url(batch_id)
             if has_verification else ""
@@ -469,17 +569,22 @@ def submit_activation(
     output_dir: Path,
     org_id: int,
     product_id: int,
-    max_total: Any,
+    confirmed_total: Any,
     progress: ProgressCallback | None = None,
+    *,
+    max_total: Any = None,
 ) -> dict[str, Any]:
     def precheck_progress(stage: str, percent: float, message: str) -> None:
         if progress:
             progress(stage, percent * 0.5, message)
 
     preview = preview_activation(
-        client, batch, output_dir, org_id, product_id, max_total,
+        client, batch, output_dir, org_id, product_id,
         precheck_progress if progress else None,
+        max_total=max_total,
     )
+    if _money(confirmed_total, "已确认总价") != _money(preview["total"], "实时总价"):
+        raise PlatformActivationStop("平台总价已变化，请重新预检并确认当前总价。")
     batch_id, records = _batch_records(batch, output_dir)
     directory = activation_directory(output_dir, batch_id)
     intent_path = directory / "intent.json"
@@ -496,6 +601,7 @@ def submit_activation(
         "product_id": product_id,
         "unit_price": preview["unit_price"],
         "total": preview["total"],
+        "confirmed_total": preview["total"],
         "max_total": preview["max_total"],
         "iccids_sha256": hashlib.sha256("\n".join(item["iccid"] for item in records).encode()).hexdigest(),
     }
@@ -555,7 +661,11 @@ def verify_activation(
     org_id = _positive_int(org_id, "组织 ID")
     product_id = _positive_int(product_id, "产品 ID")
     org_id, product_id = _validate_batch_scope(batch, org_id, product_id)
-    batch_id, records = _batch_records(batch, output_dir)
+    if client.org_id != org_id:
+        raise PlatformActivationStop("登录账号所属组织与批次组织不一致。")
+    # Status queries need only card identity, including after manual activation
+    # or loss of local QR files. Never open or fetch QR/LPA data here.
+    batch_id, records = _batch_records(batch, output_dir, require_qr=False)
     directory = activation_directory(output_dir, batch_id)
     response_path = directory / "response.json"
     expected: dict[str, Any] = {}
@@ -587,9 +697,9 @@ def verify_activation(
             and order.get("cardId") == card["inventory_id"]
             and order.get("orgId") == org_id
             and order.get("productId") == product_id
-            and (not expected or order.get("id") == expected.get(card["iccid"]))
+            and (expected.get(card["iccid"]) is None or order.get("id") == expected[card["iccid"]])
         ]
-        order = max(matched, key=lambda item: item.get("id", 0)) if matched else {}
+        order = matched[0] if len(matched) == 1 else {}
         related = [
             subscriber for subscriber in subscribers
             if subscriber.get("iccid") == card["iccid"]
@@ -601,7 +711,8 @@ def verify_activation(
         subscriber = related[0] if len(related) == 1 else {}
         phone = str(subscriber.get("phoneNumber") or "")
         success = bool(
-            order.get("orderStatus") == "ACTIVE"
+            len(matched) == 1 and len(related) == 1
+            and order.get("orderStatus") == "ACTIVE"
             and subscriber.get("subscriberStatus") == "ACTIVE"
             and subscriber.get("signalAddonStatus") == "SUCCESS"
             and order.get("signalAddonStatus") == "SUCCESS"
@@ -618,8 +729,11 @@ def verify_activation(
             "subscriber_status": str(subscriber.get("subscriberStatus") or ""),
             "signal_status": str(subscriber.get("signalAddonStatus") or ""),
             "checked_at": now(),
-            "message": "订单、号码和信号均已确认" if success else str(
-                order.get("failureReason") or "尚未满足全部成功条件"
+            "message": "订单、号码和信号均已确认" if success else (
+                "未查到匹配订单，尚不能确认激活" if not matched else
+                "匹配到多个订单，需要人工核对" if len(matched) > 1 else
+                "未查到唯一匹配的号码记录" if len(related) != 1 else
+                str(order.get("failureReason") or "尚未满足全部成功条件")
             ),
         }
         rows.append(row)
@@ -642,7 +756,7 @@ def verify_activation(
     writer.writerows(rows)
     atomic_write(directory / "verification.csv", output.getvalue().encode("utf-8-sig"))
     confirmed = sum(row["state"] == "verified" for row in rows)
-    return {
+    result = {
         "batch_id": batch_id,
         "count": len(rows),
         "confirmed": confirmed,
@@ -651,3 +765,5 @@ def verify_activation(
         "verification_csv_url": _verification_url(batch_id),
         "rows": rows,
     }
+    atomic_write(directory / "verification-result.json", json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8"))
+    return result

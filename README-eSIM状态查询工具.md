@@ -54,11 +54,12 @@ python3 nexsim_status_tool.py web --host 0.0.0.0 --port 8765
 
 ## 查询和筛选
 
-- 查询范围可选“全部 eSIM”或“指定 ICCID”；
+- Profile 查询固定只处理平台库存状态为 `USED` 的已成功开卡 eSIM，也可在该范围内限定指定 ICCID；
 - 查询过程中显示整体进度、当前阶段和百分比；
 - 结果可按 ICCID 或原始字段搜索；
-- 可筛选“已安装（INSTALLED）”；
-- 可筛选“已释放待下载（RELEASED）”；
+- 可筛选“已写入（INSTALLED）”；
+- 可筛选“未写入（RELEASED）”；
+- 可筛选 Profile 异常原始值；
 - 可筛选 Profile 查询失败；
 - 可将当前筛选列表中的 ICCID 一键导出为 TXT，每行一个 ICCID；
 - 单击记录查看完整原始字段；
@@ -136,9 +137,15 @@ python3 nexsim_profile_writer.py --input ./outputs/esim-status-raw-YYYYMMDD-HHMM
 只读核验订单、号码和信号状态
 ```
 
-提交前必须填写组织 ID、产品 ID 和本次授权金额上限。登录账号的组织必须与组织 ID 一致；总金额不能超过授权上限或激活余额。系统在外部提交前使用排他方式创建 `intent.json`，同一批次只能尝试提交一次；网络超时或响应未知时只允许执行结果核验，禁止自动重发。
+提交前先识别账号，由工具取得组织 ID，再选择可开户套餐并填写本次授权金额上限。账号、组织和套餐必须与批次一致；总金额不能超过授权上限或激活余额。系统在外部提交前使用排他方式创建 `intent.json`，同一批次只能尝试提交一次；网络超时或响应未知时只允许执行结果核验，禁止自动重发。
 
-平台开户文件保存在 `outputs/write-batches/<batch_id>/platform-activation/`，包括提交意图、CSV、平台回包、任务状态和核验结果。核验完成后，页面会显示逐卡订单、号码和信号状态，并提供核验 CSV 下载；以后重新选择该批次时仍可下载已保存的 CSV，不会因此访问平台。账号、密码和令牌不会写入文件或接口响应。
+新平台开户批次保存在 `outputs/platform-activation-batches/<pb-批次编号>.json`，开户文件保存在同目录的 `<pb-批次编号>/platform-activation/`，包括提交意图、CSV、平台回包、任务状态和核验结果。旧 `wb-` 批次仍保留在 `outputs/write-batches/`。核验 CSV 可从已保存记录下载，不会因此访问平台。
+
+账号识别成功后，历史列表按“后台地址、组织、平台返回的账号名称”匹配。新批次记录这些归属信息，不保存密码、登录令牌或 LPA 原文。同组织但不同账号的新批次不会混在一起。切换账号会立即清空旧批次详情、下载链接和预检结果，重新识别后加载对应记录；刷新页面或重启服务后，也需要重新识别账号。
+
+一次性任务逐张保存处理状态、时间、错误与文件摘要，结束后保存整批结果。重新选择批次时可查看逐卡历史状态，不会重新请求二维码或读取二维码图片。LPA 原文只存在原任务内存中，不能从历史记录恢复。中断且没有完成记录的任务显示为待核查，保持禁止重复获取。
+
+早期批次没有账号归属字段。能够确认组织的旧 `pb-`、`wb-` 批次单独列在“同组织旧记录（未记录账号，仅供查看）”，不自动归属当前账号，也不能从该记录触发获取或开户操作；无法确认组织的旧记录不展示。现有本地服务仍需部署在受控环境，历史筛选不替代整站访问认证。
 
 相关 Web API：
 
@@ -163,21 +170,23 @@ python3 nexsim_profile_writer.py --input ./outputs/esim-status-raw-YYYYMMDD-HHMM
 - 历史结果会显示本次查询使用的账号名（例如“长工”或“pddhuhu”），只保存账号名，不保存密码；旧格式历史文件会显示“未知账号（旧记录）”。
 - 历史 JSON/CSV 默认保存在服务端 `outputs/` 目录；使用 `--output-dir` 时保存到指定目录。
 
-Profile 查询使用受控并发，默认同时查询 8 张卡，减少逐张等待。可通过服务参数调整：
+Profile 查询使用受控并发，默认同时查询 2 张卡；临时错误重试时会继续降低并发。可通过服务参数调整：
 
 ```bash
-python3 nexsim_status_tool.py web --profile-workers 4
+python3 nexsim_status_tool.py web --profile-workers 2
 ```
 
 允许范围是 1—16。后台接口出现限流时应降低并发数，而不是无限增加。
 
 ## 状态含义
 
-当前已确认的 Profile 状态入口有三类：
+最近一次完整查询实际返回三种 Profile 原始状态：
 
-- `INSTALLED`：后台接口原始值，页面显示“已安装”；
-- `RELEASED`：后台接口原始值，页面显示“已释放待下载”；
-- `failed`：工具自己的查询失败标记，不是后台接口的 `data.status` 值。
+- `INSTALLED`：已写入；
+- `RELEASED`：尚未写入；
+- `ERROR`：Profile 异常。
+
+历史记录中还曾出现 `UNAVAILABLE`。工具会保留平台返回的任何新原始值；`failed` 是工具自己的查询失败标记，不是接口的 `data.status` 值。
 
 后台专用接口是：
 
@@ -186,7 +195,7 @@ GET /api/inventory/page
 GET /api/inventory/{inventoryId}/esim-usage-status
 ```
 
-其中 `inventoryId` 是库存记录的数字 `id`，不是 ICCID。库存 `status` 与 Profile `esimProfileStatus` 是两套不同状态，都会保留。
+其中 `inventoryId` 是库存记录的数字 `id`，不是 ICCID。Profile 查询固定以库存 `status=USED` 确定已成功开卡范围，再用 `esimProfileStatus` 判断是否写入；`ALLOCATED` 只属于独立的平台开户流程，不进入 Profile 统计或明细。
 
 如果平台未来返回新的原始 Profile 值，页面会显示原始值，不会偷偷归类成“其他”。
 

@@ -6,8 +6,9 @@
   "product_id": null,
   "output_dir": "C:/Users/你的用户名/Desktop/esim状态结果",
   "page_size": 100,
-  "profile_workers": 8,
+  "profile_workers": 2,
   "query_params": {
-    "simType": "ESIM"
+    "simType": "ESIM",
+    "status": "USED"
   }
 }

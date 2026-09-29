@@ -69,7 +69,7 @@ async function startQuery(event) {
   const scope = selectedScope();
   const values = iccids.value.split(/[\s,;，；]+/).map((value) => value.trim()).filter(Boolean);
   if (scope === "selected" && values.length === 0) {
-    setFormMessage("请输入至少一个 ICCID，或切换为全部 eSIM。 ");
+    setFormMessage("请输入至少一个 ICCID，或切换为全部已开卡 eSIM。");
     iccids.focus();
     return;
   }
@@ -113,7 +113,7 @@ async function pollJob() {
     $("status-message").textContent = data.message || "正在处理……";
     if (data.state === "done") {
       state.rows = Array.isArray(data.rows) ? data.rows : [];
-      state.querySummary = normalizeQuerySummary(data.profile_query_summary, state.rows);
+      state.querySummary = deriveQuerySummary(openedRows(state.rows));
       setHistoryAccount(data.account);
       $("output-paths").textContent = outputLabel(data.json_path, data.csv_path);
       finishQuery(queryCompletionMessage(state.querySummary), false);
@@ -199,7 +199,7 @@ function renderHistoryList(items) {
     title.textContent = formatHistoryTime(item.queried_at) || item.filename;
     const meta = document.createElement("span");
     const statuses = Object.entries(item.statuses || {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
-    meta.textContent = `${item.account || "未知账号"} · ${item.count || 0} 条${statuses ? ` · ${statuses}` : ""}`;
+    meta.textContent = `${item.account || "未知账号"} · USED ${item.count || 0} 张${statuses ? ` · ${statuses}` : ""}`;
     const summary = normalizeQuerySummary(item.profile_query_summary, []);
     const quality = document.createElement("span");
     quality.className = `history-quality ${summary.complete ? "is-complete" : "is-incomplete"}`;
@@ -237,13 +237,13 @@ async function loadHistory(filename) {
     if (!response.ok) throw new Error(data.error || "无法读取历史记录。");
 
     state.rows = Array.isArray(data.records) ? data.records : [];
-    state.querySummary = normalizeQuerySummary(data.profile_query_summary, state.rows);
+    state.querySummary = deriveQuerySummary(openedRows(state.rows));
     state.selectedIndex = null;
     setHistoryAccount(data.account);
     search.value = "";
     statusFilter.value = "all";
     detailLabel.textContent = "未选择记录";
-    detailContent.textContent = "单击一条记录查看平台原始字段。";
+    detailContent.textContent = "单击一条记录查看原始接口字段。";
     renderSummary();
     renderRows();
     const paths = outputLabel(data.json_path, data.csv_path);
@@ -257,7 +257,7 @@ async function loadHistory(filename) {
       : `已加载查询记录（账号：${accountLabel}）。`;
     $("status-message").textContent = state.querySummary.complete
       ? loadedLabel
-      : `${loadedLabel} 结果不完整，不能用于核对激活数量。`;
+      : `${loadedLabel} 结果不完整，不能用于核对写入状态。`;
     closeHistory();
   } catch (error) {
     setProgress(0, "历史记录未加载");
@@ -313,6 +313,20 @@ function setProgress(percent, message) {
   progressBar.style.width = `${value}%`;
   progressPercent.textContent = `${Math.round(value)}%`;
   progressMessage.textContent = message;
+}
+
+function openedRows(rows = state.rows) {
+  return rows.filter((row) => row && row.status === "USED");
+}
+
+function isQueryFailure(row) {
+  return row.esimProfileStatusQueryStatus === "failed"
+    || !Object.prototype.hasOwnProperty.call(row, "esimProfileStatus");
+}
+
+function isProfileIssue(row) {
+  return !isQueryFailure(row)
+    && !["INSTALLED", "RELEASED"].includes(row.esimProfileStatus);
 }
 
 function deriveQuerySummary(rows) {
@@ -376,23 +390,25 @@ function formatRate(value) {
 }
 
 function queryCompletionMessage(summary) {
-  if (summary.complete) return `查询完整：成功 ${summary.succeeded}/${summary.total}，结果已保存。`;
-  return `查询结束但结果不完整：成功 ${summary.succeeded}/${summary.total}，失败 ${summary.failed}。不能用于核对激活数量。`;
+  if (summary.complete) return `USED 卡 Profile 查询完整：成功 ${summary.succeeded}/${summary.total}，结果已保存。`;
+  return `查询结束但结果不完整：成功 ${summary.succeeded}/${summary.total}，失败 ${summary.failed}。不能用于核对写入状态。`;
 }
 
 function renderSummary() {
-  $("metric-total").textContent = state.rows.length;
-  $("metric-installed").textContent = state.rows.filter((row) => row.esimProfileStatus === "INSTALLED").length;
-  $("metric-released").textContent = state.rows.filter((row) => row.esimProfileStatus === "RELEASED").length;
-  $("metric-failed").textContent = state.rows.filter((row) => row.esimProfileStatusQueryStatus === "failed").length;
-  const summary = normalizeQuerySummary(state.querySummary, state.rows);
+  const rows = openedRows();
+  $("metric-total").textContent = rows.length;
+  $("metric-installed").textContent = rows.filter((row) => row.esimProfileStatus === "INSTALLED").length;
+  $("metric-released").textContent = rows.filter((row) => row.esimProfileStatus === "RELEASED").length;
+  $("metric-error").textContent = rows.filter(isProfileIssue).length;
+  $("metric-failed").textContent = rows.filter(isQueryFailure).length;
+  const summary = deriveQuerySummary(rows);
   state.querySummary = summary;
   const quality = $("query-quality");
   quality.hidden = summary.total === 0;
   quality.className = `query-quality ${summary.complete ? "query-quality-complete" : "query-quality-incomplete"}`;
   $("query-quality-title").textContent = summary.complete
-    ? "查询完整，可用于状态核对"
-    : "结果不完整，不能用于核对激活数量";
+    ? "USED 卡 Profile 查询完整，可用于核对写入状态"
+    : "结果不完整，不能用于核对写入状态";
   const retryText = summary.retried_records > 0
     ? ` · 重试 ${summary.retried_records} 条，恢复 ${summary.recovered_after_retry} 条`
     : "";
@@ -406,10 +422,12 @@ function renderSummary() {
 function renderRows() {
   const needle = search.value.trim().toLowerCase();
   const selected = statusFilter.value;
-  state.filteredRows = state.rows.filter((row) => {
+  const rows = openedRows();
+  state.filteredRows = rows.filter((row) => {
     const matchesSearch = !needle || JSON.stringify(row).toLowerCase().includes(needle);
     const matchesFilter = selected === "all"
-      || (selected === "failed" && row.esimProfileStatusQueryStatus === "failed")
+      || (selected === "failed" && isQueryFailure(row))
+      || (selected === "issue" && isProfileIssue(row))
       || row.esimProfileStatus === selected;
     return matchesSearch && matchesFilter;
   });
@@ -418,14 +436,14 @@ function renderRows() {
     const tr = document.createElement("tr");
     tr.className = "empty-row";
     const td = document.createElement("td");
-    td.colSpan = 5;
+    td.colSpan = 6;
     td.innerHTML = '<div class="empty-state"><span class="empty-glyph">◌</span><strong>没有匹配记录</strong><span>调整筛选条件后再查看。</span></div>';
     tr.append(td);
     resultBody.append(tr);
   } else {
     state.filteredRows.forEach((row, index) => resultBody.append(createRow(row, index)));
   }
-  $("record-count").textContent = `${state.filteredRows.length} / ${state.rows.length} 条`;
+  $("record-count").textContent = `${state.filteredRows.length} / ${rows.length} 张 USED 卡`;
   exportIccids.disabled = state.filteredRows.length === 0;
 }
 
@@ -453,13 +471,16 @@ function createRow(row, index) {
   const tr = document.createElement("tr");
   if (state.selectedIndex === index) tr.classList.add("selected");
   const raw = row.esimProfileStatus;
-  const failed = row.esimProfileStatusQueryStatus === "failed";
+  const failed = isQueryFailure(row);
   const statusCell = failed ? chip("查询失败", "failed") : chip(profileLabel(raw), profileClass(raw));
-  const values = [row.iccid || "", row.status || "", null,
-    row.esimProfileStatusUpdatedAt || "", failed ? "失败" : (row.esimProfileStatusQueryStatus === "ok" ? "成功" : "")];
+  const writeState = writeConclusion(row);
+  const values = [row.iccid || "", null, null,
+    row.esimProfileStatusUpdatedAt || "", failed ? "失败" : (row.esimProfileStatusQueryStatus === "ok" ? "成功" : ""),
+    row.esimProfileStatusQueryAttempts || 1];
   values.forEach((value, cellIndex) => {
     const td = document.createElement("td");
-    if (cellIndex === 2) td.append(statusCell);
+    if (cellIndex === 1) td.append(statusCell);
+    else if (cellIndex === 2) td.append(chip(writeState.label, writeState.kind));
     else {
       td.textContent = value;
       if (cellIndex === 4) td.className = failed ? "query-failed" : "query-ok";
@@ -483,15 +504,23 @@ function chip(label, kind) {
 }
 
 function profileLabel(raw) {
-  if (raw === "INSTALLED") return "已安装（INSTALLED）";
-  if (raw === "RELEASED") return "已释放待下载（RELEASED）";
-  return raw ? `原始值：${raw}` : "未返回状态";
+  return raw || "未返回状态";
 }
 
 function profileClass(raw) {
   if (raw === "INSTALLED") return "installed";
   if (raw === "RELEASED") return "released";
+  if (["ERROR", "UNAVAILABLE"].includes(raw)) return "failed";
   return "raw";
+}
+
+function writeConclusion(row) {
+  if (isQueryFailure(row)) return { label: "无法判断", kind: "failed" };
+  if (row.esimProfileStatus === "INSTALLED") return { label: "已写入", kind: "installed" };
+  if (row.esimProfileStatus === "RELEASED") return { label: "未写入", kind: "released" };
+  if (row.esimProfileStatus === "ERROR") return { label: "Profile 异常", kind: "failed" };
+  if (row.esimProfileStatus === "UNAVAILABLE") return { label: "状态不可用", kind: "failed" };
+  return { label: "未知状态", kind: "raw" };
 }
 
 function outputLabel(jsonPath, csvPath) {
