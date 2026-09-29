@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parent
 
 
 def _is_web_mode(args: list[str]) -> bool:
-    return not args or args[0] == "web"
+    effective_args = [arg for arg in args if arg != "--console"]
+    return not effective_args or effective_args[0] == "web"
 
 
 def _detach_windows_web(args: list[str]) -> bool:
@@ -42,9 +43,9 @@ def main() -> int:
     if _detach_windows_web(args):
         return 0
     args = [arg for arg in args if arg != "--console"]
-    if _is_web_mode(args):
+    if not args or args[0] == "web":
         from nexsim_status_web import main as web_main
-        return web_main(args[1:] if args else None)
+        return web_main(args[1:] if args else [])
     if args[0] == "prepare-write-batch":
         from nexsim_profile_writer import cli as writer_cli
         return writer_cli(args[1:])
