@@ -31,7 +31,7 @@
     </header>
 
     <main class="main-content">
-      <aside class="control-panel" aria-label="查询与批次控制">
+      <aside class="control-panel" aria-label="Profile 状态查询控制">
         <section class="panel query-panel">
           <div class="panel-header">
             <div>
@@ -93,36 +93,11 @@
           </form>
         </section>
 
-        <section class="panel batch-panel" aria-labelledby="batch-title">
-          <div class="panel-header">
-            <div>
-              <span class="panel-kicker">WRITE BATCH</span>
-              <h2 id="batch-title">写卡批次</h2>
-            </div>
-            <span class="badge badge-blue">未写卡</span>
-          </div>
-          <div class="panel-body">
-            <p class="panel-intro">仅接收查询成功且 Profile 为 RELEASED 的卡。创建清单不会获取激活数据。</p>
-            <div class="form-field batch-count-field">
-              <label for="batch-target">目标数量</label>
-              <input id="batch-target" type="number" min="1" max="200" value="200" inputmode="numeric">
-            </div>
-            <div class="batch-actions">
-              <button id="select-released-button" class="button button-secondary" type="button" disabled>自动选择前 N 张</button>
-              <button id="clear-selection-button" class="button button-secondary" type="button" disabled>清除选择</button>
-            </div>
-            <p id="batch-selection" class="field-hint">已选择 0 张；目标数量用于自动选择，单批最多 200 张。</p>
-            <button id="create-batch-button" class="button button-primary" type="button" disabled>生成批次清单</button>
-            <p id="batch-message" class="form-message" role="status" aria-live="polite"></p>
-            <div id="batch-result" class="batch-result" hidden></div>
-          </div>
-        </section>
-
         <section class="safety-note" aria-label="操作边界">
           <span class="safety-check" aria-hidden="true">&#10003;</span>
           <div>
             <strong>请求范围已锁定</strong>
-            <p>状态查询和批次清单不触碰激活数据；一次性任务不会自动重试。</p>
+            <p>本页只查询 eSIM Profile 状态。平台库存、二维码和开户激活请前往独立的“平台开户”页面。</p>
           </div>
         </section>
       </aside>
@@ -198,7 +173,6 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th class="selection-column">选择</th>
                   <th>ICCID</th>
                   <th>库存状态</th>
                   <th>Profile 状态</th>
@@ -208,7 +182,7 @@
               </thead>
               <tbody id="result-body">
                 <tr class="empty-row">
-                  <td colspan="6">
+                  <td colspan="5">
                     <div class="empty-state">
                       <span class="empty-glyph" aria-hidden="true">&#9676;</span>
                       <strong>等待查询</strong>

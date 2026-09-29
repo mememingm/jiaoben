@@ -24,7 +24,7 @@ import requests
 
 
 MAX_BATCH_SIZE = 200
-BATCH_ID_PATTERN = re.compile(r"^wb-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$")
+BATCH_ID_PATTERN = re.compile(r"^(?:wb|pb)-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$")
 ICCID_PATTERN = re.compile(r"^[0-9]{18,22}$")
 ProgressCallback = Callable[[str, float, str], None]
 
@@ -100,6 +100,22 @@ def _money(value: Any, label: str) -> Decimal:
     return result
 
 
+def _validate_batch_scope(
+    batch: dict[str, Any], org_id: int, product_id: int
+) -> tuple[int, int]:
+    """Bind new platform batches to the organization and product that created them."""
+    batch_id = str(batch.get("batch_id", ""))
+    if not batch_id.startswith("pb-"):
+        return org_id, product_id
+    batch_org_id = _positive_int(batch.get("org_id"), "批次组织 ID")
+    batch_product_id = _positive_int(batch.get("product_id"), "批次产品 ID")
+    if org_id != batch_org_id or product_id != batch_product_id:
+        raise PlatformActivationStop(
+            "页面中的组织或产品与所选批次不一致；请重新选择批次。"
+        )
+    return batch_org_id, batch_product_id
+
+
 class PlatformClient:
     """Authenticated client for platform activation endpoints."""
 
@@ -161,6 +177,38 @@ class PlatformClient:
             raise PlatformActivationStop(f"平台查询失败（HTTP {response.status_code}）。")
         return payload.get("data")
 
+    def get_qr_code_once(self, inventory_id: int, expected_iccid: str) -> tuple[str, dict[str, Any]]:
+        """Call the consumable QR endpoint once, without automatic retry."""
+        inventory_id = _positive_int(inventory_id, "库存 ID")
+        if not isinstance(expected_iccid, str) or not ICCID_PATTERN.fullmatch(expected_iccid):
+            raise PlatformActivationStop("ICCID 格式不正确。")
+        endpoint = f"/api/inventory/{inventory_id}/qr-code"
+        try:
+            response = self.session.get(
+                self.base + endpoint,
+                timeout=(10, 60),
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise PlatformActivationStop(
+                "二维码请求结果未知；不会重试这张卡。",
+                unknown=True,
+            ) from exc
+        payload = self._payload(response, "二维码获取")
+        data = payload.get("data")
+        if response.status_code != 200 or payload.get("code") != 0 or not isinstance(data, dict):
+            raise PlatformActivationStop(f"二维码获取失败（HTTP {response.status_code}）。")
+        if data.get("cardId") != inventory_id or data.get("iccid") != expected_iccid:
+            raise PlatformActivationStop("二维码响应与目标卡不一致。")
+        activation_code = data.get("activationCode")
+        if not isinstance(activation_code, str) or not activation_code.startswith("LPA:1$"):
+            raise PlatformActivationStop("二维码响应缺少有效 LPA。")
+        return activation_code, {
+            "status": data.get("status"),
+            "cardId": data.get("cardId"),
+            "iccid": data.get("iccid"),
+        }
+
     def submit_activation_csv(self, filename: str, blob: bytes, org_id: int, product_id: int) -> dict[str, Any]:
         try:
             response = self.session.post(
@@ -213,6 +261,28 @@ def _all_pages(client: PlatformClient, endpoint: str, params: dict[str, Any] | N
     return rows
 
 
+def list_inventory(client: PlatformClient) -> list[dict[str, Any]]:
+    """Read allocated eSIM inventory; this never calls the QR endpoint."""
+    return _all_pages(client, "/api/inventory/page", {
+        "status": "ALLOCATED",
+        "simType": "ESIM",
+        "iccid": "",
+        "dateType": "IMPORTED",
+    })
+
+
+def batch_directory(output_dir: Path, batch_id: str) -> Path:
+    if not BATCH_ID_PATTERN.fullmatch(batch_id):
+        raise PlatformActivationStop("批次编号格式不正确。")
+    root = "platform-activation-batches" if batch_id.startswith("pb-") else "write-batches"
+    return output_dir.resolve() / root / batch_id
+
+
+def _verification_url(batch_id: str) -> str:
+    route = "platform-batches" if batch_id.startswith("pb-") else "write-batches"
+    return f"/api/{route}/{batch_id}/platform-activation/verification.csv"
+
+
 def _batch_records(batch: dict[str, Any], output_dir: Path) -> tuple[str, list[dict[str, Any]]]:
     batch_id = str(batch.get("batch_id", ""))
     if not BATCH_ID_PATTERN.fullmatch(batch_id):
@@ -220,7 +290,7 @@ def _batch_records(batch: dict[str, Any], output_dir: Path) -> tuple[str, list[d
     records = batch.get("records")
     if not isinstance(records, list) or not 1 <= len(records) <= MAX_BATCH_SIZE:
         raise PlatformActivationStop("写卡批次必须包含 1—200 张卡。")
-    expected_qr_dir = (output_dir.resolve() / "write-batches" / batch_id / "qr").resolve()
+    expected_qr_dir = (batch_directory(output_dir, batch_id) / "qr").resolve()
     inventory_ids: set[int] = set()
     iccids: set[str] = set()
     normalized: list[dict[str, Any]] = []
@@ -233,10 +303,8 @@ def _batch_records(batch: dict[str, Any], output_dir: Path) -> tuple[str, list[d
             raise PlatformActivationStop("写卡批次包含无效 ICCID。")
         if inventory_id in inventory_ids or iccid in iccids:
             raise PlatformActivationStop("写卡批次包含重复库存 ID 或 ICCID。")
-        if record.get("profile_status") != "RELEASED":
-            raise PlatformActivationStop(f"ICCID {iccid} 不是 RELEASED。")
-        if record.get("precheck_status") != "RELEASED" or record.get("qr_status") != "saved":
-            raise PlatformActivationStop(f"ICCID {iccid} 尚未完成激活数据准备。")
+        if record.get("qr_status") != "saved":
+            raise PlatformActivationStop(f"ICCID {iccid} 尚未完成二维码准备。")
         qr_path = Path(str(record.get("qr_path", ""))).resolve()
         try:
             qr_path.relative_to(expected_qr_dir)
@@ -291,16 +359,12 @@ def preview_activation(
     """Perform read-only eligibility, duplicate-order, product, and balance checks."""
     org_id = _positive_int(org_id, "组织 ID")
     product_id = _positive_int(product_id, "产品 ID")
+    org_id, product_id = _validate_batch_scope(batch, org_id, product_id)
     maximum = _money(max_total, "授权金额上限")
     batch_id, records = _batch_records(batch, output_dir)
     if progress:
         progress("inventory", 10, "正在复核库存资格……")
-    inventory = _all_pages(client, "/api/inventory/page", {
-        "status": "ALLOCATED",
-        "simType": "ESIM",
-        "iccid": "",
-        "dateType": "IMPORTED",
-    })
+    inventory = list_inventory(client)
     eligible = {
         row.get("id"): row
         for row in inventory
@@ -357,9 +421,7 @@ def _activation_csv(records: list[dict[str, Any]]) -> bytes:
 
 
 def activation_directory(output_dir: Path, batch_id: str) -> Path:
-    if not BATCH_ID_PATTERN.fullmatch(batch_id):
-        raise PlatformActivationStop("写卡批次编号格式不正确。")
-    return output_dir.resolve() / "write-batches" / batch_id / "platform-activation"
+    return batch_directory(output_dir, batch_id) / "platform-activation"
 
 
 def activation_artifact_summary(output_dir: Path, batch_id: str) -> dict[str, Any]:
@@ -384,7 +446,7 @@ def activation_artifact_summary(output_dir: Path, batch_id: str) -> dict[str, An
         "has_submission_intent": has_intent,
         "has_verification": has_verification,
         "verification_csv_url": (
-            f"/api/write-batches/{batch_id}/platform-activation/verification.csv"
+            _verification_url(batch_id)
             if has_verification else ""
         ),
     }
@@ -492,6 +554,7 @@ def verify_activation(
 ) -> dict[str, Any]:
     org_id = _positive_int(org_id, "组织 ID")
     product_id = _positive_int(product_id, "产品 ID")
+    org_id, product_id = _validate_batch_scope(batch, org_id, product_id)
     batch_id, records = _batch_records(batch, output_dir)
     directory = activation_directory(output_dir, batch_id)
     response_path = directory / "response.json"
@@ -585,6 +648,6 @@ def verify_activation(
         "confirmed": confirmed,
         "all_confirmed": confirmed == len(rows),
         "checked_at": now(),
-        "verification_csv_url": f"/api/write-batches/{batch_id}/platform-activation/verification.csv",
+        "verification_csv_url": _verification_url(batch_id),
         "rows": rows,
     }

@@ -21,6 +21,7 @@ import nexsim_status_checker as checker
 import nexsim_profile_writer as writer
 import nexsim_profile_activation as activation
 import nexsim_platform_activation as platform_activation
+import nexsim_platform_batch as platform_batch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -48,7 +49,7 @@ def _configure_headless_output(output_dir: Path) -> None:
 
 
 class JobManager:
-    def __init__(self, output_dir: Path, profile_workers: int = 8):
+    def __init__(self, output_dir: Path, profile_workers: int = 2):
         self.output_dir = output_dir.resolve()
         self.profile_workers = profile_workers
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -585,10 +586,191 @@ class ActivationJobManager:
             return {key: value for key, value in job.items() if key not in {"cancel", "credentials"}}
 
 
+class PlatformInventoryJobManager:
+    """Read and classify platform inventory without touching QR data."""
+
+    def __init__(self):
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.lock = threading.Lock()
+
+    def start(self, payload: dict[str, Any]) -> str:
+        username = str(payload.get("username", "")).strip()
+        password = payload.get("password")
+        if not username or not isinstance(password, str) or not password:
+            raise checker.Stop("读取平台库存需要账号和密码。")
+        org_id = payload.get("org_id")
+        product_id = payload.get("product_id")
+        if type(org_id) is not int or org_id <= 0 or type(product_id) is not int or product_id <= 0:
+            raise checker.Stop("组织 ID 和产品 ID 必须是正整数。")
+        job_id = "pi-" + uuid.uuid4().hex
+        job = {
+            "id": job_id,
+            "state": "running",
+            "progress": 0,
+            "stage": "login",
+            "message": "正在登录并读取平台库存……",
+            "result": {},
+            "error": "",
+            "credentials": (username, password),
+            "base_url": str(payload.get("base_url") or "https://admin.nexsimus.com").strip(),
+            "org_id": org_id,
+            "product_id": product_id,
+        }
+        with self.lock:
+            self.jobs[job_id] = job
+        threading.Thread(
+            target=self._run,
+            args=(job_id,),
+            daemon=True,
+            name=f"platform-inventory-{job_id[:8]}",
+        ).start()
+        return job_id
+
+    def _run(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+
+        def progress(stage: str, percent: float, message: str) -> None:
+            with self.lock:
+                job.update(stage=stage, progress=round(percent, 1), message=message)
+
+        try:
+            client = platform_activation.PlatformClient(
+                job["base_url"], job["credentials"][0], job["credentials"][1], job["org_id"]
+            )
+            result = platform_batch.inspect_inventory(
+                client, job["org_id"], job["product_id"], progress
+            )
+            with self.lock:
+                job.update(state="done", progress=100, stage="done", result=result,
+                           message=f"平台库存读取完成：{result['eligible_count']} 张可加入批次。")
+        except (platform_activation.PlatformActivationStop, platform_batch.PlatformBatchStop) as exc:
+            with self.lock:
+                job.update(state="failed", stage="blocked", message=str(exc), error=str(exc))
+        except Exception:
+            message = "平台库存任务发生未预期错误。"
+            with self.lock:
+                job.update(state="failed", stage="blocked", message=message, error=message)
+        finally:
+            with self.lock:
+                job["credentials"] = None
+
+    def snapshot(self, job_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return None
+            return {key: value for key, value in job.items() if key != "credentials"}
+
+
+class PlatformQrJobManager:
+    """Run explicitly confirmed, one-shot QR retrieval for a platform batch."""
+
+    def __init__(self, batches: platform_batch.PlatformBatchStore, output_dir: Path):
+        self.batches = batches
+        self.output_dir = output_dir.resolve()
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.lock = threading.Lock()
+
+    def start(self, payload: dict[str, Any]) -> str:
+        batch_id = str(payload.get("batch_id", "")).strip()
+        self.batches.validate_id(batch_id)
+        username = str(payload.get("username", "")).strip()
+        password = payload.get("password")
+        if not username or not isinstance(password, str) or not password:
+            raise checker.Stop("获取二维码需要重新确认平台账号和密码。")
+        batch = self.batches.mark_qr_started(batch_id)
+        job_id = "pq-" + uuid.uuid4().hex
+        job = {
+            "id": job_id,
+            "batch_id": batch_id,
+            "state": "running",
+            "progress": 0,
+            "stage": "login",
+            "message": "准备一次性获取二维码……",
+            "results": [],
+            "summary": {},
+            "error": "",
+            "cancel": threading.Event(),
+            "credentials": (username, password),
+            "base_url": str(payload.get("base_url") or "https://admin.nexsimus.com").strip(),
+            "batch": batch,
+        }
+        with self.lock:
+            self.jobs[job_id] = job
+        threading.Thread(
+            target=self._run,
+            args=(job_id,),
+            daemon=True,
+            name=f"platform-qr-{job_id[:8]}",
+        ).start()
+        return job_id
+
+    def _run(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+
+        def progress(stage: str, percent: float, message: str) -> None:
+            with self.lock:
+                job.update(stage=stage, progress=round(percent, 1), message=message)
+
+        try:
+            batch = job["batch"]
+            client = platform_activation.PlatformClient(
+                job["base_url"], job["credentials"][0], job["credentials"][1], batch["org_id"]
+            )
+            results = platform_batch.fetch_batch_qr(
+                client, batch, self.output_dir, progress, job["cancel"].is_set
+            )
+            public_results: list[dict[str, Any]] = []
+            for result in results:
+                view = {key: value for key, value in result.items() if key != "qr_path"}
+                if result.get("state") == "ready":
+                    view["qr_url"] = f"/api/platform-batches/{batch['batch_id']}/qr/{int(result['sequence'])}"
+                public_results.append(view)
+            summary = self.batches.finish_qr(batch["batch_id"], results)
+            ready = summary.get("ready", 0)
+            with self.lock:
+                job.update(state="done", progress=100, stage="done", results=public_results,
+                           summary=summary,
+                           message=f"二维码任务结束：{ready}/{len(batch['records'])} 张已保存。")
+        except (platform_activation.PlatformActivationStop, platform_batch.PlatformBatchStop) as exc:
+            self.batches.abort_qr(job["batch_id"], str(exc))
+            state = "cancelled" if job["cancel"].is_set() else "failed"
+            with self.lock:
+                job.update(state=state, stage="blocked", message=str(exc), error=str(exc))
+        except Exception:
+            message = "二维码任务发生未预期错误；不会自动重试。"
+            self.batches.abort_qr(job["batch_id"], message)
+            with self.lock:
+                job.update(state="failed", stage="blocked", message=message, error=message)
+        finally:
+            with self.lock:
+                job["credentials"] = None
+                job.pop("batch", None)
+
+    def cancel(self, job_id: str) -> bool:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job or job["state"] != "running":
+                return False
+            job["cancel"].set()
+            job["message"] = "正在停止；不会请求后续卡。"
+            return True
+
+    def snapshot(self, job_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return None
+            return {
+                key: value for key, value in job.items()
+                if key not in {"credentials", "cancel", "batch"}
+            }
+
+
 class PlatformActivationJobManager:
     """Run platform activation preview, submit, or verification as explicit jobs."""
 
-    def __init__(self, batches: WriteBatchManager, output_dir: Path):
+    def __init__(self, batches: platform_batch.PlatformBatchStore, output_dir: Path):
         self.batches = batches
         self.output_dir = output_dir.resolve()
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -598,18 +780,20 @@ class PlatformActivationJobManager:
         if action not in {"preview", "submit", "verify"}:
             raise checker.Stop("平台开户动作不正确。")
         batch_id = str(payload.get("batch_id", "")).strip()
-        self.batches._validate_id(batch_id)
+        self.batches.validate_id(batch_id)
         batch = self.batches.snapshot(batch_id)
         if batch is None:
-            raise checker.Stop("写卡批次不存在。")
+            raise checker.Stop("平台开户批次不存在。")
         username = str(payload.get("username", "")).strip()
         password = payload.get("password")
         if not username or not isinstance(password, str) or not password:
             raise checker.Stop("平台开户需要重新确认后台账号和密码。")
-        org_id = payload.get("org_id")
-        product_id = payload.get("product_id")
+        org_id = batch.get("org_id")
+        product_id = batch.get("product_id")
         if type(org_id) is not int or org_id <= 0 or type(product_id) is not int or product_id <= 0:
-            raise checker.Stop("组织 ID 和产品 ID 必须是正整数。")
+            raise checker.Stop("平台开户批次缺少有效的组织 ID 或产品 ID。")
+        if payload.get("org_id") != org_id or payload.get("product_id") != product_id:
+            raise checker.Stop("页面中的组织或产品与所选批次不一致；请重新选择批次。")
         max_total = str(payload.get("max_total", "")).strip()
         if action != "verify" and not max_total:
             raise checker.Stop("提交前必须填写本次授权金额上限。")
@@ -711,6 +895,9 @@ class Handler(BaseHTTPRequestHandler):
     manager: JobManager
     write_batches: WriteBatchManager
     activation_jobs: ActivationJobManager
+    platform_inventory_jobs: PlatformInventoryJobManager
+    platform_batches: platform_batch.PlatformBatchStore
+    platform_qr_jobs: PlatformQrJobManager
     platform_activation_jobs: PlatformActivationJobManager
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -752,6 +939,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/write-batches":
             self._json({"items": self.write_batches.index()})
             return
+        if path == "/api/platform-batches":
+            self._json({"items": self.platform_batches.index()})
+            return
         if path == "/api/history/latest":
             payload = self.manager.load_history()
             if payload is None:
@@ -780,6 +970,22 @@ class Handler(BaseHTTPRequestHandler):
             snapshot = self.activation_jobs.snapshot(job_id)
             if snapshot is None:
                 self._json({"error": "激活数据任务不存在。"}, 404)
+            else:
+                self._json(snapshot)
+            return
+        if path.startswith("/api/platform-inventory-jobs/"):
+            job_id = path.removeprefix("/api/platform-inventory-jobs/").strip("/")
+            snapshot = self.platform_inventory_jobs.snapshot(job_id)
+            if snapshot is None:
+                self._json({"error": "平台库存任务不存在。"}, 404)
+            else:
+                self._json(snapshot)
+            return
+        if path.startswith("/api/platform-qr-jobs/"):
+            job_id = path.removeprefix("/api/platform-qr-jobs/").removesuffix("/cancel").strip("/")
+            snapshot = self.platform_qr_jobs.snapshot(job_id)
+            if snapshot is None:
+                self._json({"error": "二维码任务不存在。"}, 404)
             else:
                 self._json(snapshot)
             return
@@ -867,6 +1073,83 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(snapshot)
             return
+        if path.startswith("/api/platform-batches/"):
+            suffix = path.removeprefix("/api/platform-batches/").strip("/")
+            activation_artifact_match = re.fullmatch(
+                r"([^/]+)/platform-activation/(verification\.csv)", suffix
+            )
+            if activation_artifact_match:
+                batch_id, filename = activation_artifact_match.groups()
+                try:
+                    data = platform_activation.read_activation_artifact(
+                        self.platform_batches.output_dir, batch_id, filename
+                    )
+                except platform_activation.PlatformActivationStop as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                if data is None:
+                    self._json({"error": "平台开户核验结果不存在。"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{batch_id}-platform-verification.csv"',
+                )
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            qr_match = re.fullmatch(r"([^/]+)/qr/([1-9][0-9]{0,2})", suffix)
+            if qr_match:
+                batch_id, sequence_text = qr_match.groups()
+                try:
+                    data = self.platform_batches.qr_file(batch_id, int(sequence_text))
+                except platform_batch.PlatformBatchStop as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                if data is None:
+                    self._json({"error": "二维码不存在或尚未生成。"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if suffix.endswith("/export.csv"):
+                batch_id = suffix.removesuffix("/export.csv").strip("/")
+                try:
+                    data = self.platform_batches.export_csv(batch_id)
+                except platform_batch.PlatformBatchStop as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                if data is None:
+                    self._json({"error": "平台开户批次不存在。"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{batch_id}.csv"')
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            batch_id = suffix
+            try:
+                snapshot = self.platform_batches.snapshot(batch_id)
+            except platform_batch.PlatformBatchStop as exc:
+                self._json({"error": str(exc)}, 400)
+                return
+            if snapshot is None:
+                self._json({"error": "平台开户批次不存在。"}, 404)
+            else:
+                self._json(snapshot)
+            return
         self._serve_static(path)
 
     def do_DELETE(self) -> None:
@@ -917,6 +1200,18 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = self.activation_jobs.start(self._read_json())
                 self._json({"job_id": job_id}, 202)
                 return
+            if path == "/api/platform-inventory-jobs":
+                job_id = self.platform_inventory_jobs.start(self._read_json())
+                self._json({"job_id": job_id}, 202)
+                return
+            if path == "/api/platform-batches":
+                batch = self.platform_batches.create(self._read_json())
+                self._json({key: value for key, value in batch.items() if key != "records"}, 201)
+                return
+            if path == "/api/platform-qr-jobs":
+                job_id = self.platform_qr_jobs.start(self._read_json())
+                self._json({"job_id": job_id}, 202)
+                return
             if path in {
                 "/api/platform-activation/preview",
                 "/api/platform-activation/submit",
@@ -933,6 +1228,13 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json({"ok": True})
                 return
+            if path.startswith("/api/platform-qr-jobs/") and path.endswith("/cancel"):
+                job_id = path.removeprefix("/api/platform-qr-jobs/").removesuffix("/cancel").strip("/")
+                if not self.platform_qr_jobs.cancel(job_id):
+                    self._json({"error": "二维码任务不存在或已经结束。"}, 409)
+                else:
+                    self._json({"ok": True})
+                return
             if path.startswith("/api/jobs/") and path.endswith("/cancel"):
                 job_id = path.removeprefix("/api/jobs/").removesuffix("/cancel").strip("/")
                 if not self.manager.cancel(job_id):
@@ -941,7 +1243,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True})
                 return
             self._json({"error": "接口不存在。"}, 404)
-        except checker.Stop as exc:
+        except (checker.Stop, platform_batch.PlatformBatchStop) as exc:
             self._json({"error": str(exc)}, 400)
         except Exception:
             self._json({"error": "服务内部发生未预期错误。"}, 500)
@@ -953,8 +1255,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765, help="监听端口，默认 8765")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
                         help="服务端结果目录")
-    parser.add_argument("--profile-workers", type=int, default=8,
-                        help="并发 Profile 查询数，范围 1—16")
+    parser.add_argument("--profile-workers", type=int, default=2,
+                        help="并发 Profile 查询数，默认 2，范围 1—16")
     args = parser.parse_args(argv)
     if not 1 <= args.profile_workers <= 16:
         parser.error("--profile-workers 必须是 1—16")
@@ -964,10 +1266,16 @@ def main(argv: list[str] | None = None) -> int:
     manager = JobManager(output_dir, args.profile_workers)
     write_batches = WriteBatchManager(output_dir)
     activation_jobs = ActivationJobManager(write_batches, output_dir)
-    platform_activation_jobs = PlatformActivationJobManager(write_batches, output_dir)
+    platform_inventory_jobs = PlatformInventoryJobManager()
+    platform_batches = platform_batch.PlatformBatchStore(output_dir)
+    platform_qr_jobs = PlatformQrJobManager(platform_batches, output_dir)
+    platform_activation_jobs = PlatformActivationJobManager(platform_batches, output_dir)
     Handler.manager = manager
     Handler.write_batches = write_batches
     Handler.activation_jobs = activation_jobs
+    Handler.platform_inventory_jobs = platform_inventory_jobs
+    Handler.platform_batches = platform_batches
+    Handler.platform_qr_jobs = platform_qr_jobs
     Handler.platform_activation_jobs = platform_activation_jobs
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True

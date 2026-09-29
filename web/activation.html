@@ -10,127 +10,43 @@
 <body>
   <div class="app-container">
     <header class="top-nav">
-      <a class="nav-brand" href="/" aria-label="返回 eSIM Profile Manager">
+      <a class="nav-brand" href="/activation.html" aria-label="平台开户激活首页">
         <span class="brand-mark" aria-hidden="true"><span></span></span>
-        <span class="brand-copy">
-          <strong>平台开户激活</strong>
-          <span>NexSim platform operations</span>
-        </span>
+        <span class="brand-copy"><strong>平台开户激活</strong><span>NexSim platform console</span></span>
       </a>
-      <div class="nav-actions">
-        <a class="nav-button nav-link" href="/">Profile 状态</a>
-        <div class="service-indicator" aria-label="本地服务运行中">
-          <span class="indicator-dot" aria-hidden="true"></span>
-          <span>本地服务</span>
-        </div>
-      </div>
+      <div class="nav-actions"><a class="nav-button nav-link" href="/">Profile 状态</a><div class="service-indicator" aria-label="本地服务运行中"><span class="indicator-dot" aria-hidden="true"></span><span>本地服务</span></div></div>
     </header>
-
-    <main class="activation-main">
-      <section class="activation-hero">
-        <span class="panel-kicker">PLATFORM ACTIVATION</span>
-        <h1>批量开户激活</h1>
-        <p>把已经完成批次准备的卡提交到平台开户，并在独立页面跟踪任务和核验结果。</p>
+    <main class="activation-main platform-console">
+      <section class="activation-hero platform-hero"><div><span class="panel-kicker">PLATFORM OPERATIONS</span><h1>平台库存、二维码与开户激活</h1><p>直接使用平台库存建立批次。这里不查询、也不依赖 eSIM Profile 状态。</p></div><div class="platform-flow" aria-label="平台操作流程"><span>01 读取库存</span><span>02 建立批次</span><span>03 获取二维码</span><span>04 开户核验</span></div></section>
+      <section class="panel activation-config-panel">
+        <div class="panel-header"><div><span class="panel-kicker">ACCOUNT</span><h2>平台账号与业务参数</h2></div><span class="badge badge-blue">独立流程</span></div>
+        <form id="activation-form" class="panel-body platform-config-grid">
+          <div class="form-field"><label for="activation-username">后台账号</label><input id="activation-username" type="text" autocomplete="username" required></div>
+          <div class="form-field"><label for="activation-password">后台密码</label><input id="activation-password" type="password" autocomplete="current-password" required></div>
+          <div class="form-field"><label for="activation-org-id">组织 ID</label><input id="activation-org-id" type="number" min="1" step="1" placeholder="例如 564" required></div>
+          <div class="form-field"><label for="activation-product-id">产品 ID</label><input id="activation-product-id" type="number" min="1" step="1" placeholder="例如 7" required></div>
+          <div class="form-field"><label for="activation-max-total">本次授权金额上限</label><input id="activation-max-total" type="number" min="0" step="0.01" placeholder="提交前必填"></div>
+          <details class="advanced-section platform-advanced"><summary>连接设置</summary><div class="advanced-content"><div class="form-field"><label for="activation-base-url">后台地址</label><input id="activation-base-url" type="url" value="https://admin.nexsimus.com" required></div></div></details>
+          <p class="field-hint platform-credential-note">账号密码只进入本地服务当前任务内存，不写入浏览器存储或批次文件。</p>
+        </form>
       </section>
-
-      <div class="activation-grid">
-        <section class="panel activation-config-panel">
-          <div class="panel-header">
-            <div>
-              <span class="panel-kicker">CONFIGURATION</span>
-              <h2>任务配置</h2>
-            </div>
-            <span class="badge badge-blue">独立流程</span>
-          </div>
-          <form id="activation-form" class="panel-body">
-            <div class="form-field">
-              <label for="activation-username">后台账号</label>
-              <input id="activation-username" type="text" autocomplete="username" required>
-            </div>
-            <div class="form-field">
-              <label for="activation-password">后台密码</label>
-              <input id="activation-password" type="password" autocomplete="current-password" required>
-            </div>
-            <details class="advanced-section">
-              <summary>连接和业务参数</summary>
-              <div class="advanced-content activation-fields">
-                <div class="form-field">
-                  <label for="activation-base-url">后台地址</label>
-                  <input id="activation-base-url" type="url" value="https://admin.nexsimus.com" required>
-                </div>
-                <div class="form-field">
-                  <label for="activation-org-id">组织 ID</label>
-                  <input id="activation-org-id" type="number" min="1" step="1" placeholder="例如 564" required>
-                </div>
-                <div class="form-field">
-                  <label for="activation-product-id">产品 ID</label>
-                  <input id="activation-product-id" type="number" min="1" step="1" placeholder="例如 7" required>
-                </div>
-                <div class="form-field">
-                  <label for="activation-max-total">本次授权金额上限</label>
-                  <input id="activation-max-total" type="number" min="0" step="0.01" placeholder="必须明确填写" required>
-                </div>
-              </div>
-            </details>
-            <p class="field-hint">账号密码只发送到本地服务内存中的当前任务，不写入浏览器存储。</p>
-          </form>
-        </section>
-
-        <section class="panel activation-batch-panel">
-          <div class="panel-header">
-            <div>
-              <span class="panel-kicker">BATCHES</span>
-              <h2>选择准备批次</h2>
-            </div>
-            <button id="refresh-batches" class="button button-secondary" type="button">刷新</button>
-          </div>
-          <div class="panel-body">
-            <label class="field-label" for="batch-select">写卡准备批次</label>
-            <select id="batch-select" aria-label="选择写卡准备批次">
-              <option value="">正在读取批次……</option>
-            </select>
-            <div id="batch-summary" class="activation-summary" aria-live="polite">请选择一个批次。</div>
-            <p class="field-hint">只有已完成激活数据准备的批次才能进入平台开户预检。</p>
-          </div>
-        </section>
+      <div class="platform-workspace-grid">
+        <section class="panel platform-inventory-panel"><div class="panel-header"><div><span class="panel-kicker">INVENTORY</span><h2>可开户库存</h2></div><button id="load-inventory" class="button button-secondary" type="button">读取平台库存</button></div><div class="panel-body platform-inventory-body">
+          <div class="inventory-toolbar"><div class="form-field compact-field"><label for="inventory-target">目标数量</label><input id="inventory-target" type="number" min="1" max="200" value="1" inputmode="numeric"></div><button id="auto-select-inventory" class="button button-secondary" type="button" disabled>自动选择</button><button id="clear-inventory-selection" class="button button-quiet" type="button" disabled>清除</button></div>
+          <div id="inventory-summary" class="activation-summary" aria-live="polite">填写账号与组织、产品 ID 后读取库存。</div>
+          <div id="inventory-progress" class="progress-panel" hidden><div class="progress-info"><span id="inventory-progress-message">准备读取库存</span><strong id="inventory-progress-percent">0%</strong></div><div class="progress-track" role="progressbar" aria-label="库存读取进度"><div id="inventory-progress-bar" class="progress-bar"></div></div></div>
+          <div class="platform-table-wrap inventory-table-wrap"><table class="platform-table"><thead><tr><th>选择</th><th>ICCID</th><th>库存</th><th>二维码次数</th><th>资格</th></tr></thead><tbody id="inventory-body"><tr><td colspan="5" class="platform-empty">尚未读取库存</td></tr></tbody></table></div>
+          <div class="inventory-footer"><span id="inventory-selection">已选择 0 张，单批最多 200 张。</span><button id="create-platform-batch" class="button button-primary" type="button" disabled>建立平台开户批次</button></div><p id="inventory-message" class="form-message" role="status" aria-live="polite"></p>
+        </div></section>
+        <section class="panel platform-batch-panel"><div class="panel-header"><div><span class="panel-kicker">BATCH</span><h2>平台批次与二维码</h2></div><button id="refresh-platform-batches" class="button button-secondary" type="button">刷新</button></div><div class="panel-body">
+          <label class="field-label" for="platform-batch-select">平台库存批次</label><select id="platform-batch-select" aria-label="选择平台开户批次"><option value="">正在读取批次……</option></select><div id="platform-batch-summary" class="activation-summary" aria-live="polite">请选择或新建一个平台批次。</div>
+          <div class="batch-file-actions"><a id="download-platform-batch" class="button button-secondary" href="#" download hidden>下载 ICCID CSV</a><button id="fetch-platform-qr" class="button button-caution" type="button" disabled>一次性获取 LPA + 二维码</button><button id="cancel-platform-qr" class="button button-quiet" type="button" disabled>停止后续获取</button></div>
+          <div id="qr-progress" class="progress-panel" hidden><div class="progress-info"><span id="qr-progress-message">准备二维码任务</span><strong id="qr-progress-percent">0%</strong></div><div class="progress-track" role="progressbar" aria-label="二维码任务进度"><div id="qr-progress-bar" class="progress-bar"></div></div></div><div id="qr-results" class="activation-results" hidden></div><p id="batch-message" class="form-message" role="status" aria-live="polite"></p>
+        </div></section>
       </div>
-
-      <section class="panel activation-workflow-panel">
-        <div class="panel-header">
-          <div>
-            <span class="panel-kicker">WORKFLOW</span>
-            <h2>开户工作流</h2>
-          </div>
-          <span id="workflow-state" class="badge badge-neutral">等待选择批次</span>
-        </div>
-        <div class="workflow-steps" aria-label="开户流程步骤">
-          <div class="workflow-step" data-step="preview"><span>01</span><strong>只读预检</strong><small>库存、重复订单、产品、金额与余额</small></div>
-          <div class="workflow-step" data-step="submit"><span>02</span><strong>明确提交</strong><small>一次性提交，未知结果禁止重发</small></div>
-          <div class="workflow-step" data-step="verify"><span>03</span><strong>结果核验</strong><small>订单、号码和信号状态逐张确认</small></div>
-        </div>
-        <div class="workflow-actions">
-          <button id="preview-button" class="button button-secondary" type="button" disabled>执行只读预检</button>
-          <button id="submit-button" class="button button-primary" type="button" disabled>提交平台开户激活</button>
-          <button id="verify-button" class="button button-secondary" type="button" disabled>核验激活结果</button>
-        </div>
-        <div id="platform-progress" class="progress-panel" hidden>
-          <div class="progress-info"><span id="platform-progress-message">准备任务</span><strong id="platform-progress-percent">0%</strong></div>
-          <div class="progress-track"><div id="platform-progress-bar" class="progress-bar"></div></div>
-        </div>
-        <div id="preview-result" class="activation-result" hidden></div>
-        <div id="verification-result" class="activation-result" hidden></div>
-        <p id="activation-message" class="form-message" role="status" aria-live="polite"></p>
-      </section>
-
-      <section class="safety-note activation-safety">
-        <span class="safety-check" aria-hidden="true">&#10003;</span>
-        <div>
-          <strong>平台激活与 Profile 状态已分离</strong>
-          <p>本页面不查看、不下载、不生成二维码；提交前必须人工复核金额和批次，提交后只允许核验，不自动重发。</p>
-        </div>
-      </section>
+      <section class="panel activation-workflow-panel"><div class="panel-header"><div><span class="panel-kicker">ACTIVATION</span><h2>平台开户与结果核验</h2></div><span id="workflow-state" class="badge badge-neutral">等待二维码准备</span></div><div class="workflow-steps" aria-label="平台开户流程步骤"><div class="workflow-step" data-step="preview"><span>01</span><strong>只读预检</strong><small>库存、重复订单、产品、金额与余额</small></div><div class="workflow-step" data-step="submit"><span>02</span><strong>明确提交</strong><small>一次性扣费提交，未知结果禁止重发</small></div><div class="workflow-step" data-step="verify"><span>03</span><strong>结果核验</strong><small>订单、号码和信号状态逐张确认</small></div></div><div class="workflow-actions"><button id="preview-button" class="button button-secondary" type="button" disabled>执行只读预检</button><button id="submit-button" class="button button-primary" type="button" disabled>提交平台开户激活</button><button id="verify-button" class="button button-secondary" type="button" disabled>核验激活结果</button></div><div id="platform-progress" class="progress-panel" hidden><div class="progress-info"><span id="platform-progress-message">准备任务</span><strong id="platform-progress-percent">0%</strong></div><div class="progress-track" role="progressbar" aria-label="平台开户进度"><div id="platform-progress-bar" class="progress-bar"></div></div></div><div id="preview-result" class="activation-result" hidden></div><div id="verification-result" class="activation-result" hidden></div><p id="activation-message" class="form-message" role="status" aria-live="polite"></p></section>
+      <section class="safety-note activation-safety"><span class="safety-check" aria-hidden="true">&#10003;</span><div><strong>平台流程与 Profile 状态完全分离</strong><p>本页只按平台库存条件选卡。二维码需要单独确认，每张只请求一次；提交前还需要再次确认数量与金额。</p></div></section>
     </main>
-  </div>
-  <script src="/activation.js" defer></script>
+  </div><script src="/activation.js" defer></script>
 </body>
 </html>
