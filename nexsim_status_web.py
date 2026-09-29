@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import nexsim_status_checker as checker
 import nexsim_profile_writer as writer
 import nexsim_profile_activation as activation
+import nexsim_platform_activation as platform_activation
 
 
 ROOT = Path(__file__).resolve().parent
@@ -293,7 +294,7 @@ class WriteBatchManager:
         with self.lock:
             cached = self.batches.get(batch_id)
             if cached is not None:
-                return dict(cached)
+                return self._decorate(dict(cached), batch_id)
         path = self.batch_dir / f"{batch_id}.json"
         if not path.is_file():
             return None
@@ -303,12 +304,46 @@ class WriteBatchManager:
             raise checker.Stop("写卡批次文件无法读取。") from exc
         if not isinstance(value, dict):
             raise checker.Stop("写卡批次文件格式异常。")
+        return self._decorate(value, batch_id)
+
+    def _decorate(self, value: dict[str, Any], batch_id: str) -> dict[str, Any]:
         value.update({
-            "json_path": str(path),
+            "json_path": str(self.batch_dir / f"{batch_id}.json"),
             "csv_path": str(self.batch_dir / f"{batch_id}.csv"),
             "csv_download": f"/api/write-batches/{batch_id}/export.csv",
+            "platform_activation": platform_activation.activation_artifact_summary(
+                self.output_dir, batch_id
+            ),
         })
         return value
+
+    def index(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for path in sorted(self.batch_dir.glob("wb-*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            records = value.get("records")
+            if not isinstance(records, list):
+                records = []
+            batch_id = path.stem
+            items.append({
+                "batch_id": batch_id,
+                "created_at": value.get("created_at", ""),
+                "state": value.get("state", "draft"),
+                "stage": value.get("stage", ""),
+                "count": len(records),
+                "qr_operations": value.get("qr_operations", "none"),
+                "lpa_operations": value.get("lpa_operations", "none"),
+                "write_operations": value.get("write_operations", "none"),
+                "platform_activation": platform_activation.activation_artifact_summary(
+                    self.output_dir, batch_id
+                ),
+            })
+        return items
 
     def export_csv(self, batch_id: str) -> bytes | None:
         self._validate_id(batch_id)
@@ -322,7 +357,7 @@ class WriteBatchManager:
         batch_id = self._validate_id(str(batch.get("batch_id", "")))
         json_path = self.batch_dir / f"{batch_id}.json"
         csv_path = self.batch_dir / f"{batch_id}.csv"
-        transient = {"json_path", "csv_path", "csv_download", "results"}
+        transient = {"json_path", "csv_path", "csv_download", "platform_activation", "results"}
         stored = {key: value for key, value in batch.items() if key not in transient}
         writer.atomic_write(json_path, json.dumps(stored, ensure_ascii=False, indent=2).encode("utf-8"))
         records = stored.get("records")
@@ -517,10 +552,134 @@ class ActivationJobManager:
                 return None
             return {key: value for key, value in job.items() if key not in {"cancel", "credentials"}}
 
+
+class PlatformActivationJobManager:
+    """Run platform activation preview, submit, or verification as explicit jobs."""
+
+    def __init__(self, batches: WriteBatchManager, output_dir: Path):
+        self.batches = batches
+        self.output_dir = output_dir.resolve()
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.lock = threading.Lock()
+
+    def start(self, payload: dict[str, Any], action: str) -> str:
+        if action not in {"preview", "submit", "verify"}:
+            raise checker.Stop("平台开户动作不正确。")
+        batch_id = str(payload.get("batch_id", "")).strip()
+        self.batches._validate_id(batch_id)
+        batch = self.batches.snapshot(batch_id)
+        if batch is None:
+            raise checker.Stop("写卡批次不存在。")
+        username = str(payload.get("username", "")).strip()
+        password = payload.get("password")
+        if not username or not isinstance(password, str) or not password:
+            raise checker.Stop("平台开户需要重新确认后台账号和密码。")
+        org_id = payload.get("org_id")
+        product_id = payload.get("product_id")
+        if type(org_id) is not int or org_id <= 0 or type(product_id) is not int or product_id <= 0:
+            raise checker.Stop("组织 ID 和产品 ID 必须是正整数。")
+        max_total = str(payload.get("max_total", "")).strip()
+        if action != "verify" and not max_total:
+            raise checker.Stop("提交前必须填写本次授权金额上限。")
+        artifact_state = platform_activation.activation_artifact_summary(
+            self.output_dir, batch_id
+        )
+        if action == "submit" and artifact_state["has_submission_intent"]:
+            raise checker.Stop("这个批次已经尝试过平台开户激活；禁止重发，请执行结果核验。")
+        base_url = str(payload.get("base_url") or "https://admin.nexsimus.com").strip()
+        job_id = "pa-" + uuid.uuid4().hex
+        job = {
+            "id": job_id,
+            "action": action,
+            "batch_id": batch_id,
+            "state": "running",
+            "progress": 0,
+            "stage": "login",
+            "message": "准备平台开户任务……",
+            "preview": {},
+            "result": {},
+            "error": "",
+            "credentials": (username, password),
+            "base_url": base_url,
+            "org_id": org_id,
+            "product_id": product_id,
+            "max_total": max_total,
+            "batch": batch,
+        }
+        with self.lock:
+            self.jobs[job_id] = job
+        thread = threading.Thread(
+            target=self._run,
+            args=(job_id,),
+            daemon=True,
+            name=f"platform-activation-{job_id[:8]}",
+        )
+        thread.start()
+        return job_id
+
+    def _update(self, job_id: str, **changes: Any) -> None:
+        with self.lock:
+            job = self.jobs[job_id]
+            job.update(changes)
+
+    def _run(self, job_id: str) -> None:
+        with self.lock:
+            job = self.jobs[job_id]
+
+        def progress(stage: str, percent: float, message: str) -> None:
+            self._update(job_id, stage=stage, progress=round(percent, 1), message=message)
+
+        try:
+            client = platform_activation.PlatformClient(
+                job["base_url"], job["credentials"][0], job["credentials"][1], job["org_id"]
+            )
+            action = job["action"]
+            if action == "preview":
+                result = platform_activation.preview_activation(
+                    client, job["batch"], self.output_dir, job["org_id"], job["product_id"],
+                    job["max_total"], progress,
+                )
+                self._update(job_id, state="done", progress=100, stage="done",
+                             message="预检完成，尚未提交激活。", preview=result, result=result)
+            elif action == "submit":
+                result = platform_activation.submit_activation(
+                    client, job["batch"], self.output_dir, job["org_id"], job["product_id"],
+                    job["max_total"], progress,
+                )
+                self._update(job_id, state="done", progress=100, stage="done",
+                             message="激活提交结束，请执行结果核验。", result=result)
+            else:
+                result = platform_activation.verify_activation(
+                    client, job["batch"], self.output_dir, job["org_id"], job["product_id"], progress,
+                )
+                self._update(job_id, state="done", progress=100, stage="done",
+                             message=f"结果核验完成：{result['confirmed']}/{result['count']} 张确认成功。",
+                             result=result)
+        except platform_activation.PlatformActivationStop as exc:
+            self._update(job_id, state="failed", stage="blocked", message=str(exc), error=str(exc))
+        except Exception:
+            message = "平台开户任务发生未预期错误；请检查服务日志后再决定是否核验。"
+            self._update(job_id, state="failed", stage="blocked", message=message, error=message)
+        finally:
+            with self.lock:
+                job["credentials"] = None
+                job.pop("batch", None)
+
+    def snapshot(self, job_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return None
+            return {
+                key: value for key, value in job.items()
+                if key not in {"credentials", "batch"}
+            }
+
 class Handler(BaseHTTPRequestHandler):
     manager: JobManager
     write_batches: WriteBatchManager
     activation_jobs: ActivationJobManager
+    platform_activation_jobs: PlatformActivationJobManager
 
     def log_message(self, format: str, *args: Any) -> None:
         # Do not log request bodies, credentials, or query results.
@@ -558,6 +717,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/history":
             self._json({"items": self.manager.history_index()})
             return
+        if path == "/api/write-batches":
+            self._json({"items": self.write_batches.index()})
+            return
         if path == "/api/history/latest":
             payload = self.manager.load_history()
             if payload is None:
@@ -589,8 +751,43 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(snapshot)
             return
+        if path.startswith("/api/platform-activation-jobs/"):
+            job_id = path.removeprefix("/api/platform-activation-jobs/").strip("/")
+            snapshot = self.platform_activation_jobs.snapshot(job_id)
+            if snapshot is None:
+                self._json({"error": "平台开户任务不存在。"}, 404)
+            else:
+                self._json(snapshot)
+            return
         if path.startswith("/api/write-batches/"):
             suffix = path.removeprefix("/api/write-batches/").strip("/")
+            activation_artifact_match = re.fullmatch(
+                r"([^/]+)/platform-activation/(verification\.csv)", suffix
+            )
+            if activation_artifact_match:
+                batch_id, filename = activation_artifact_match.groups()
+                try:
+                    data = platform_activation.read_activation_artifact(
+                        self.write_batches.output_dir, batch_id, filename
+                    )
+                except platform_activation.PlatformActivationStop as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                if data is None:
+                    self._json({"error": "平台开户核验结果不存在。"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{batch_id}-platform-verification.csv"',
+                )
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             qr_match = re.fullmatch(r"([^/]+)/qr/([1-9][0-9]{0,2})", suffix)
             if qr_match:
                 batch_id, sequence_text = qr_match.groups()
@@ -657,6 +854,8 @@ class Handler(BaseHTTPRequestHandler):
             "/index.html": (WEB_ROOT / "index.html", "text/html; charset=utf-8"),
             "/app.js": (WEB_ROOT / "app.js", "text/javascript; charset=utf-8"),
             "/styles.css": (WEB_ROOT / "styles.css", "text/css; charset=utf-8"),
+            "/activation.html": (WEB_ROOT / "activation.html", "text/html; charset=utf-8"),
+            "/activation.js": (WEB_ROOT / "activation.js", "text/javascript; charset=utf-8"),
         }
         entry = files.get(path)
         if entry is None or not entry[0].is_file():
@@ -684,6 +883,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/activation-jobs":
                 job_id = self.activation_jobs.start(self._read_json())
+                self._json({"job_id": job_id}, 202)
+                return
+            if path in {
+                "/api/platform-activation/preview",
+                "/api/platform-activation/submit",
+                "/api/platform-activation/verify",
+            }:
+                action = path.rsplit("/", 1)[-1]
+                job_id = self.platform_activation_jobs.start(self._read_json(), action)
                 self._json({"job_id": job_id}, 202)
                 return
             if path.startswith("/api/activation-jobs/") and path.endswith("/cancel"):
@@ -724,9 +932,11 @@ def main(argv: list[str] | None = None) -> int:
     manager = JobManager(output_dir, args.profile_workers)
     write_batches = WriteBatchManager(output_dir)
     activation_jobs = ActivationJobManager(write_batches, output_dir)
+    platform_activation_jobs = PlatformActivationJobManager(write_batches, output_dir)
     Handler.manager = manager
     Handler.write_batches = write_batches
     Handler.activation_jobs = activation_jobs
+    Handler.platform_activation_jobs = platform_activation_jobs
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
     print(f"eSIM Profile 状态服务已启动：http://{args.host}:{args.port}")

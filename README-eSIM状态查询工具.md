@@ -39,6 +39,9 @@ python3 nexsim_status_tool.py
 
 启动后打开：<http://127.0.0.1:8765>
 
+- Profile 状态查询：<http://127.0.0.1:8765/>
+- 平台批量开户激活：<http://127.0.0.1:8765/activation.html>
+
 页面中输入后台账号和密码，点击“获取 eSIM 状态”。组织 ID 会从登录结果自动识别。
 
 服务默认只监听本机。如果要让同一局域网的其他设备访问：
@@ -115,6 +118,39 @@ python3 nexsim_profile_writer.py --input ./outputs/esim-status-raw-YYYYMMDD-HHMM
 
 当前还没有接入具体 eUICC 写卡器的命令行、SDK 或 HTTP API，因此任务完成后是“拿到 LPA + 生成二维码”，不是已经写入实体卡。后续接入写卡器时，应在同一个一次性任务里把 LPA 直接交给写卡器，并在完成后重新查询 Profile 状态确认 `INSTALLED`。
 
+## 平台批量开户激活（独立页面）
+
+`/activation.html` 与 Profile 状态查询是两个独立页面。它补齐 `oneoff.py` 中的平台侧开户能力，不代表实体 eUICC 写卡：
+
+```text
+选择已准备批次
+  ↓
+只读预检：库存资格、重复订单、产品、单价、总金额、激活余额
+  ↓
+人工复核批次数量和金额，并再次确认
+  ↓
+一次性提交平台 CSV 激活请求
+  ↓
+轮询批量任务
+  ↓
+只读核验订单、号码和信号状态
+```
+
+提交前必须填写组织 ID、产品 ID 和本次授权金额上限。登录账号的组织必须与组织 ID 一致；总金额不能超过授权上限或激活余额。系统在外部提交前使用排他方式创建 `intent.json`，同一批次只能尝试提交一次；网络超时或响应未知时只允许执行结果核验，禁止自动重发。
+
+平台开户文件保存在 `outputs/write-batches/<batch_id>/platform-activation/`，包括提交意图、CSV、平台回包、任务状态和核验结果。核验完成后，页面会显示逐卡订单、号码和信号状态，并提供核验 CSV 下载；以后重新选择该批次时仍可下载已保存的 CSV，不会因此访问平台。账号、密码和令牌不会写入文件或接口响应。
+
+相关 Web API：
+
+- `GET /api/write-batches`
+- `POST /api/platform-activation/preview`
+- `POST /api/platform-activation/submit`
+- `POST /api/platform-activation/verify`
+- `GET /api/platform-activation-jobs/{job_id}`
+- `GET /api/write-batches/{batch_id}/platform-activation/verification.csv`
+
+这组接口不会自动运行。必须由激活页面的对应按钮明确触发；页面加载、切换页面或刷新批次不会提交激活。
+
 相关 Web API：
 
 - `POST /api/write-batches`
@@ -158,7 +194,7 @@ GET /api/inventory/{inventoryId}/esim-usage-status
 
 状态查询和“生成写卡批次清单”不会调用二维码接口，也不会读取或保存 `activationCode`/LPA。只有用户在页面中明确点击并确认“一次性获取 LPA + 二维码”后，独立的一次性任务才会逐张调用二维码接口。
 
-工具不会：
+Profile 状态查询页不会：
 
 - 自动触发、重试或重复调用二维码接口；
 - 读取平台的二维码剩余查看次数；
@@ -168,6 +204,8 @@ GET /api/inventory/{inventoryId}/esim-usage-status
 - 在未接入写卡器 SDK/CLI 的情况下声称已经写入实体 eUICC。
 
 状态查询除登录使用一次 POST 外，只执行库存分页和 Profile 状态 GET。账号密码只在服务端内存中用于当前任务，任务结束后清掉，不写入结果文件。二维码 PNG 仅在用户明确确认一次性任务后保存到对应批次目录。
+
+独立的平台激活页可以在用户明确操作后执行订单预检、一次性提交和结果核验，但不会自动提交、自动重试提交、续订、销毁或恢复，也不会替代实体 eUICC 写卡器。
 
 ## 命令行模式
 
