@@ -234,6 +234,12 @@ def fetch_batch_profile_data(
                 if progress:
                     progress("qr", index, total, f"第 {index}/{total} 张状态为 {profile_status}，已跳过")
                 continue
+            from nexsim_material_guard import claim
+            from nexsim_platform_activation import PlatformActivationStop
+            try:
+                claim(output_dir, client, inventory_id, batch_id)
+            except PlatformActivationStop as exc:
+                raise ActivationStop("该卡已有安装资料获取记录，禁止重复请求。", unknown=True) from exc
             activation_code, response_meta = client.get_qr_code_once(inventory_id, iccid)
             qr_blob = render_qr_png(activation_code)
             qr_path = qr_dir / f"{int(record.get('sequence', index)):04d}-{iccid}.png"

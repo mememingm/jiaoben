@@ -24,6 +24,7 @@ import nexsim_profile_writer as writer
 import nexsim_profile_activation as activation
 import nexsim_platform_activation as platform_activation
 import nexsim_platform_batch as platform_batch
+from nexsim_installation import InstallationManager
 
 
 ROOT = Path(__file__).resolve().parent
@@ -1031,6 +1032,7 @@ class PlatformActivationJobManager:
             }
 
 class Handler(BaseHTTPRequestHandler):
+    installation_jobs: InstallationManager
     manager: JobManager
     write_batches: WriteBatchManager
     activation_jobs: ActivationJobManager
@@ -1043,6 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         # Do not log request bodies, credentials, or query results.
         message = re.sub(r"\?[^\s\"]+", "", format % args)
+        message = re.sub(r"im-[a-f0-9]{32}", "installation-job", message)
         print(f"{self.address_string()} - {message}")
 
     def _json(self, value: Any, status: int = 200) -> None:
@@ -1107,6 +1110,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
+        if path.startswith("/api/installation-jobs/"):
+            suffix = path.removeprefix("/api/installation-jobs/")
+            match = re.fullmatch(r"(im-[a-f0-9]{32})/files/([1-9][0-9]*)\.(txt|png)", suffix)
+            if match:
+                job_id, inventory_id, extension = match.groups()
+                data = self.installation_jobs.download(job_id, int(inventory_id), extension)
+                if data is None:
+                    self._json({"error": "资料不存在或服务已重启，请核查本地 installation-batches 目录"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png" if extension == "png" else "text/plain; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{inventory_id}.{extension}"')
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            job = self.installation_jobs.snapshot(suffix)
+            self._json(job or {"error": "任务不存在或服务已重启；不要重复获取，请核查本地记录"}, 200 if job else 404)
+            return
         if path == "/api/health":
             self._json({"ok": True, "service": "esim-profile-status"})
             return
@@ -1430,6 +1454,8 @@ class Handler(BaseHTTPRequestHandler):
             "/styles.css": (WEB_ROOT / "styles.css", "text/css; charset=utf-8"),
             "/activation.html": (WEB_ROOT / "activation.html", "text/html; charset=utf-8"),
             "/activation.js": (WEB_ROOT / "activation.js", "text/javascript; charset=utf-8"),
+            "/installation.html": (WEB_ROOT / "installation.html", "text/html; charset=utf-8"),
+            "/installation.js": (WEB_ROOT / "installation.js", "text/javascript; charset=utf-8"),
         }
         entry = files.get(path)
         if entry is None or not entry[0].is_file():
@@ -1446,6 +1472,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         try:
+            if path == "/api/installation/prepare":
+                self._json({"job_id": self.installation_jobs.start_prepare(self._read_json())}, 202)
+                return
+            if path == "/api/installation/fetch":
+                self._json({"job_id": self.installation_jobs.start_fetch(self._read_json())}, 202)
+                return
+            if path == "/api/installation/cancel":
+                ok = self.installation_jobs.cancel(self._read_json().get("job_id"))
+                self._json({"ok": ok}, 200 if ok else 409)
+                return
             if path == "/api/jobs":
                 job_id = self.manager.start(self._read_json())
                 self._json({"job_id": job_id}, 202)
@@ -1540,6 +1576,7 @@ def main(argv: list[str] | None = None) -> int:
     platform_qr_jobs = PlatformQrJobManager(platform_batches, output_dir)
     platform_activation_jobs = PlatformActivationJobManager(platform_batches, output_dir)
     Handler.manager = manager
+    Handler.installation_jobs = InstallationManager(output_dir)
     Handler.write_batches = write_batches
     Handler.activation_jobs = activation_jobs
     Handler.platform_context_jobs = platform_context_jobs

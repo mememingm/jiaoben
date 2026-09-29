@@ -1,5 +1,7 @@
 # NexSim Profile 状态与平台开户工具
 
+已开卡、待安装的卡可使用独立的 [按 ICCID 准备手动写入](docs/manual-installation.md) 页面：`/installation.html`。支持从查询结果带入或粘贴 ICCID、只读核对、明确确认后获取安装资料、下载已保存资料和安装后复查；不会再次提交开户。
+
 这是一个本地 Web 工具，包含两套彼此独立的业务流程：
 
 - **Profile 状态查询**：查询 eSIM Profile 状态，展示 `INSTALLED`、`RELEASED` 和查询失败，并保存每次查询记录。

@@ -45,6 +45,16 @@ document.querySelectorAll('input[name="scope"]').forEach((radio) => {
 search.addEventListener("input", renderRows);
 statusFilter.addEventListener("change", renderRows);
 exportIccids.addEventListener("click", exportCurrentIccids);
+$("prepare-installation").addEventListener("click", () => {
+  if (state.jobId || state.loadingHistory) return;
+  const rows = state.filteredRows.filter((row) => row.status === "USED" && row.esimProfileStatus === "RELEASED" && !isQueryFailure(row));
+  if (!rows.length || rows.length > 200) {
+    setFormMessage("请筛选 1—200 张 USED + RELEASED 卡；也可直接进入手动写入资料页粘贴 ICCID。");
+    return;
+  }
+  sessionStorage.setItem("installation-iccids", JSON.stringify(rows.map((row) => row.iccid)));
+  location.href = "/installation.html";
+});
 form.addEventListener("submit", startQuery);
 cancelButton.addEventListener("click", cancelQuery);
 loadHistoryButton.addEventListener("click", loadLatestHistory);
@@ -547,3 +557,14 @@ function formatHistoryTime(value) {
 
 renderSummary();
 renderRows();
+const recheckIccids = sessionStorage.getItem("profile-recheck-iccids");
+if (recheckIccids) {
+  sessionStorage.removeItem("profile-recheck-iccids");
+  try {
+    iccids.value = JSON.parse(recheckIccids).join("\n");
+    const radio = document.querySelector('input[name="scope"][value="selected"]');
+    radio.checked = true;
+    radio.dispatchEvent(new Event("change"));
+    setFormMessage("已带入安装批次 ICCID，请输入账号密码后查询；不会自动请求平台。");
+  } catch { setFormMessage("ICCID 导入失败，请重新填写。"); }
+}

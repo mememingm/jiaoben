@@ -627,6 +627,8 @@ def fetch_batch_qr(
             exclusive_write(marker, json.dumps(attempt, ensure_ascii=False, indent=2).encode("utf-8"))
             if progress:
                 progress("qr", 5 + (index - 1) / total * 90, f"正在获取二维码：{index}/{total}")
+            from nexsim_material_guard import claim
+            claim(output_dir, client, inventory_id, batch_id)
             activation_code, response_meta = client.get_qr_code_once(inventory_id, iccid)
             if not LPA_PATTERN.fullmatch(activation_code):
                 raise PlatformBatchStop("二维码接口返回的 LPA 格式不正确。")

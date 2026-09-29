@@ -43,7 +43,8 @@ class ActivationTests(unittest.TestCase):
                 "ownerOrgId": 1, "productId": 2, "inventoryType": "P", "simType": "ESIM",
                 "status": "ALLOCATED", "qrCodeSupported": True}], "pages": 1},
             "/api/orders/page": {"records": [], "pages": 1},
-            "/api/products": [{"id": 2, "displayPrice": price}],
+            "/api/products": [{"id": 2, "displayPrice": price, "cardCategory": "P_CARD",
+                               "productPurpose": "BASE_PLAN", "activationEnabled": 1}],
             "/api/finance/organizations/1/balances": [{"balanceType": "ACTIVATION", "balance": balance}],
         }
         self.client.get.side_effect = lambda endpoint, params=None: data[endpoint]
@@ -91,30 +92,30 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(summary["state"], "checked")
         self.assertIsNone(summary["verification"])
 
-    def test_preview_needs_no_amount_input(self):
+    def test_preview_uses_explicit_amount_limit(self):
         self.prepare_preview()
-        result = activation.preview_activation(self.client, self.batch, self.root, 1, 2)
+        result = activation.preview_activation(self.client, self.batch, self.root, 1, 2, max_total="50.00")
         self.assertEqual(result["total"], "12.00")
-        self.assertNotIn("max_total", result)
+        self.assertEqual(result["max_total"], "50.00")
 
     def test_insufficient_balance_still_blocks(self):
         self.prepare_preview(balance="1.00")
         with self.assertRaisesRegex(activation.PlatformActivationStop, "余额不足"):
-            activation.preview_activation(self.client, self.batch, self.root, 1, 2)
+            activation.preview_activation(self.client, self.batch, self.root, 1, 2, max_total="50.00")
 
     def test_changed_total_blocks_before_intent_or_write(self):
         self.prepare_preview(price="13.00")
         with self.assertRaisesRegex(activation.PlatformActivationStop, "总价已变化"):
-            activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00")
+            activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00", max_total="50.00")
         self.client.submit_activation_csv.assert_not_called()
         self.assertFalse(activation.activation_artifact_summary(self.root, self.batch["batch_id"])["has_submission_intent"])
 
     def test_matching_total_submits_once_using_iccid(self):
         self.prepare_preview()
         self.client.submit_activation_csv.return_value = {"_http_status": 200, "code": 0, "data": {}}
-        activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00")
+        activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00", max_total="50.00")
         with self.assertRaises(activation.PlatformActivationStop):
-            activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00")
+            activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00", max_total="50.00")
         self.client.submit_activation_csv.assert_called_once()
         self.assertEqual(self.client.submit_activation_csv.call_args.args[1].decode("utf-8-sig"), "ICCID\r\n" + "0" * 20 + "\r\n")
 
@@ -123,7 +124,7 @@ class ActivationTests(unittest.TestCase):
         self.client.submit_activation_csv.side_effect = activation.PlatformActivationStop("unknown", unknown=True)
         for _ in range(2):
             with self.assertRaises(activation.PlatformActivationStop):
-                activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00")
+                activation.submit_activation(self.client, self.batch, self.root, 1, 2, "12.00", max_total="50.00")
         self.client.submit_activation_csv.assert_called_once()
 
     def test_job_automatically_verifies_after_submit_and_preserves_query_failure(self):
@@ -132,7 +133,7 @@ class ActivationTests(unittest.TestCase):
                 manager = web.PlatformActivationJobManager(Mock(), self.root)
                 manager.jobs["test"] = {"action": "submit", "batch": copy.deepcopy(self.batch),
                     "base_url": "https://example.invalid", "credentials": ("test", "test"),
-                    "org_id": 1, "product_id": 2, "confirmed_total": "12.00"}
+                    "org_id": 1, "product_id": 2, "confirmed_total": "12.00", "max_total": "50.00"}
                 with patch.object(activation, "PlatformClient", return_value=self.client), \
                      patch.object(activation, "submit_activation", return_value={}) as submit, \
                      patch.object(activation, "verify_activation", return_value={"confirmed": 1},
