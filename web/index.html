@@ -16,12 +16,21 @@
         <p class="subtitle">读取平台原始 Profile 状态，并准备未写卡的 RELEASED 批次清单</p>
       </div>
       <div class="topbar-actions">
-        <button id="load-history" class="topbar-button" type="button" title="读取最近一次已保存的查询结果">
-          ↺ 加载上次结果
+        <button id="load-history" class="topbar-button" type="button" title="打开已保存的查询记录">
+          ▤ 查询记录
         </button>
         <div class="service-state"><span class="state-dot"></span><span>本地服务</span></div>
       </div>
     </header>
+
+    <section id="history-panel" class="history-panel" hidden aria-labelledby="history-title">
+      <div class="history-panel-heading">
+        <div><p class="section-kicker">HISTORY</p><h2 id="history-title">查询记录</h2></div>
+        <button id="close-history" class="topbar-button history-close" type="button">关闭</button>
+      </div>
+      <p class="history-help">每次查询都会单独保存。加载不会重新请求后台；删除会同时移除对应的 JSON 和 CSV 文件。</p>
+      <div id="history-list" class="history-list"><div class="history-empty">正在读取记录……</div></div>
+    </section>
 
     <main class="workspace">
       <aside class="control-column">

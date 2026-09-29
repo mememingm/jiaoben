@@ -21,6 +21,9 @@ const iccids = $("iccids");
 const queryButton = $("query-button");
 const cancelButton = $("cancel-button");
 const loadHistoryButton = $("load-history");
+const historyPanel = $("history-panel");
+const closeHistoryButton = $("close-history");
+const historyList = $("history-list");
 const progressPanel = $("progress-panel");
 const progressBar = $("progress-bar");
 const progressMessage = $("progress-message");
@@ -52,6 +55,7 @@ exportIccids.addEventListener("click", exportCurrentIccids);
 form.addEventListener("submit", startQuery);
 cancelButton.addEventListener("click", cancelQuery);
 loadHistoryButton.addEventListener("click", loadLatestHistory);
+closeHistoryButton.addEventListener("click", () => { historyPanel.hidden = true; });
 batchTarget.addEventListener("input", updateBatchControls);
 selectReleasedButton.addEventListener("click", selectReleasedRows);
 clearSelectionButton.addEventListener("click", clearSelection);
@@ -151,13 +155,77 @@ async function cancelQuery() {
 
 async function loadLatestHistory() {
   if (state.jobId || state.loadingHistory) return;
+  historyPanel.hidden = false;
+  await loadHistoryIndex();
+}
+
+async function loadHistoryIndex() {
+  historyList.replaceChildren();
+  const loading = document.createElement("div");
+  loading.className = "history-empty";
+  loading.textContent = "正在读取记录……";
+  historyList.append(loading);
+  try {
+    const response = await fetch("/api/history", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "无法读取查询记录。");
+    renderHistoryList(Array.isArray(data.items) ? data.items : []);
+  } catch (error) {
+    historyList.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = error.message;
+    historyList.append(empty);
+  }
+}
+
+function renderHistoryList(items) {
+  historyList.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = "还没有保存的查询记录。";
+    historyList.append(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "history-item";
+    const info = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = formatHistoryTime(item.queried_at) || item.filename;
+    const meta = document.createElement("span");
+    const statuses = Object.entries(item.statuses || {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
+    meta.textContent = `${item.account || "未知账号"} · ${item.count || 0} 条${statuses ? ` · ${statuses}` : ""}`;
+    info.append(title, meta);
+    const actions = document.createElement("div");
+    actions.className = "history-actions";
+    const load = document.createElement("button");
+    load.className = "button button-secondary";
+    load.type = "button";
+    load.textContent = "加载";
+    load.addEventListener("click", () => loadHistory(item.filename));
+    const remove = document.createElement("button");
+    remove.className = "button button-danger";
+    remove.type = "button";
+    remove.textContent = "删除";
+    remove.addEventListener("click", () => deleteHistory(item.filename, title.textContent));
+    actions.append(load, remove);
+    card.append(info, actions);
+    historyList.append(card);
+  });
+}
+
+async function loadHistory(filename) {
+  if (state.jobId || state.loadingHistory) return;
   state.loadingHistory = true;
   loadHistoryButton.disabled = true;
   queryButton.disabled = true;
   setFormMessage("");
   setProgress(0, "正在读取上次保存的结果……");
   try {
-    const response = await fetch("/api/history/latest", { cache: "no-store" });
+    const endpoint = filename ? `/api/history/${encodeURIComponent(filename)}` : "/api/history/latest";
+    const response = await fetch(endpoint, { cache: "no-store" });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "无法读取历史记录。");
 
@@ -182,8 +250,9 @@ async function loadLatestHistory() {
     const queriedAt = formatHistoryTime(data.queried_at);
     const accountLabel = data.account || "未知账号（旧记录）";
     $("status-message").textContent = queriedAt
-      ? `已加载上次结果（账号：${accountLabel}；查询时间：${queriedAt}）。`
-      : `已加载上次结果（账号：${accountLabel}）。`;
+      ? `已加载查询记录（账号：${accountLabel}；查询时间：${queriedAt}）。`
+      : `已加载查询记录（账号：${accountLabel}）。`;
+    historyPanel.hidden = true;
   } catch (error) {
     setProgress(0, "历史记录未加载");
     setFormMessage(error.message === "还没有保存的历史记录。"
@@ -195,6 +264,19 @@ async function loadLatestHistory() {
     loadHistoryButton.disabled = false;
     queryButton.disabled = Boolean(state.jobId);
     updateBatchControls();
+  }
+}
+
+async function deleteHistory(filename, label) {
+  if (!window.confirm(`确定删除查询记录“${label}”吗？对应 JSON 和 CSV 都会删除。`)) return;
+  try {
+    const response = await fetch(`/api/history/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "删除失败。");
+    await loadHistoryIndex();
+    $("status-message").textContent = "查询记录已删除。";
+  } catch (error) {
+    setFormMessage(error.message);
   }
 }
 

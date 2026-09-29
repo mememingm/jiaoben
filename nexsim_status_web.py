@@ -27,7 +27,9 @@ WEB_ROOT = ROOT / "web"
 DEFAULT_OUTPUT_DIR = ROOT / "outputs"
 MAX_BODY_BYTES = 1_000_000
 WRITE_BATCH_ID = re.compile(r"^wb-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$")
-HISTORY_FILE_PATTERN = re.compile(r"^esim-status-raw-[0-9]{8}-[0-9]{6}\.json$")
+HISTORY_FILE_PATTERN = re.compile(
+    r"^esim-status-raw-[0-9]{8}-[0-9]{6}(?:-[0-9]{6})?\.json$"
+)
 
 
 def _configure_headless_output(output_dir: Path) -> None:
@@ -235,6 +237,21 @@ class JobManager:
         payload["json_path"] = str(path)
         payload["csv_path"] = str(path.with_suffix(".csv"))
         return payload
+
+    def delete_history(self, filename: str) -> bool:
+        path = self._history_path(filename)
+        if path is None:
+            return False
+        csv_path = path.with_suffix(".csv")
+        try:
+            path.unlink()
+            try:
+                csv_path.unlink()
+            except FileNotFoundError:
+                pass
+        except OSError:
+            return False
+        return True
 
 
 class WriteBatchManager:
@@ -622,6 +639,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(snapshot)
             return
         self._serve_static(path)
+
+    def do_DELETE(self) -> None:
+        path = urlsplit(self.path).path
+        if path.startswith("/api/history/"):
+            filename = path.removeprefix("/api/history/").strip("/")
+            if self.manager.delete_history(filename):
+                self._json({"ok": True, "filename": filename})
+            else:
+                self._json({"error": "历史记录不存在或删除失败。"}, 404)
+            return
+        self._json({"error": "接口不存在。"}, 404)
 
     def _serve_static(self, path: str) -> None:
         files = {

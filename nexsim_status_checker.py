@@ -394,7 +394,7 @@ def write_outputs(
 ) -> tuple[Path, Path]:
     out = Path(config["output_dir"])
     out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d-%H%M%S-%f")
     json_path = out / f"esim-status-raw-{stamp}.json"
     csv_path = out / f"esim-status-raw-{stamp}.csv"
     metadata = {"queried_at": now(), "source": source,
