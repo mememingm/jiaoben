@@ -1,6 +1,6 @@
 # NexSim 批量工具交接文档
 
-> 当前交接快照见 [docs/current-handoff.md](docs/current-handoff.md)。本文件保留早期设计与演变记录，下文的 Git、服务状态和“当前版本”表述可能已过时。
+> 后续交接快照见 [current-handoff.md](../current-handoff.md)。本文件保留早期设计与演变记录，下文的 Git、服务状态和“当前版本”表述可能已过时。
 
 > 更新日期：2026-09-29
 > 最新界面以第 21 节为准；前文提交激活流程保留为历史说明。  
