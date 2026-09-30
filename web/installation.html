@@ -21,7 +21,7 @@
           <details class="advanced-section"><summary>高级设置</summary><div class="form-field"><label for="base-url">后台地址</label><input id="base-url" type="url" value="https://admin.nexsimus.com" required></div></details>
           <div class="form-field"><label for="iccids">ICCID（最多 200 张）</label><textarea id="iccids" rows="8" required placeholder="每行一个 ICCID，也支持逗号分隔"></textarea></div>
           <button id="prepare" class="button button-primary" type="submit">只读核对 ICCID</button>
-          <p class="field-hint">匹配当前账号的 USED 库存，再复核 RELEASED。此步骤不会获取安装资料。</p>
+          <p class="field-hint">匹配当前账号的 USED 库存，再复核 RELEASED。此步骤不会调用“查看二维码”接口。</p>
         </form>
       </section>
       <section class="safety-note"><div><strong>用于已开通号码的设备安装</strong><p>获取二维码和 LPA 后，由你手动下载安装。本页不会新建订单、再次开户或自动写入设备。</p></div></section>
@@ -36,8 +36,9 @@
           <button id="cancel" class="button button-quiet" disabled>停止后续卡</button>
           <button id="recheck" class="button button-secondary" disabled>安装后复查状态</button>
         </div>
+        <p id="selection-summary" class="installation-selection-summary" role="status" aria-live="polite">核对完成后可选择卡片。</p>
         <div class="table-scroll"><table class="data-table"><thead><tr><th>选择</th><th>ICCID</th><th>Profile</th><th>剩余查看次数</th><th>结果 / 原因</th><th>安装资料</th></tr></thead><tbody id="rows"><tr><td colspan="6">等待核对</td></tr></tbody></table></div>
-        <footer class="table-footer"><span>确认获取会消耗平台查看次数；超时不重试。资料保存到服务端 outputs/installation-batches，下载不会再次请求平台。</span></footer>
+        <footer class="table-footer"><span>确认获取可能消耗平台查看次数；超时不重试。资料保存到服务端 outputs/installation-batches，下载不会再次请求平台。</span></footer>
       </section>
     </section>
   </main>

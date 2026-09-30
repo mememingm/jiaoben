@@ -794,6 +794,14 @@ select:disabled {
   border-bottom: 1px solid var(--line);
 }
 
+.installation-selection-summary {
+  margin: 0;
+  padding: 8px 18px;
+  color: var(--text-soft);
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+}
+
 .search-box {
   position: relative;
   flex: 1;

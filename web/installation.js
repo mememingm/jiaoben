@@ -16,10 +16,16 @@ async function api(url, body) {
 function controls() {
   ["username", "password", "base-url", "iccids", "prepare"].forEach((id) => { el(id).disabled = busy; });
   const prepared = !busy && current?.state === "prepared" && !current.fetch_started;
-  el("select-ready").disabled = !prepared;
+  const readyIds = prepared ? current.rows.filter((row) => row.eligible).map((row) => row.inventory_id) : [];
+  const allSelected = readyIds.length > 0 && readyIds.every((id) => selected.has(id));
+  el("select-ready").disabled = !readyIds.length;
+  el("select-ready").textContent = allSelected ? "取消全选可处理卡" : "选择全部可处理卡";
+  el("selection-summary").textContent = prepared
+    ? `已选 ${selected.size} / 可处理 ${readyIds.length} 张`
+    : current?.fetch_started ? "本批次已开始获取；可下载已保存的资料。" : "核对完成后可选择卡片。";
   el("fetch").disabled = !prepared || !selected.size;
   el("cancel").disabled = current?.state !== "fetching";
-  el("recheck").disabled = busy || !current?.rows?.length;
+  el("recheck").disabled = busy || !current?.rows?.some((row) => row.state === "saved");
 }
 function render() {
   el("rows").replaceChildren();
@@ -66,7 +72,14 @@ el("installation-form").addEventListener("submit", async (event) => {
   try { const data = await api("/api/installation/prepare", { ...credentials(), iccids }); jobId = data.job_id; sessionStorage.setItem("installation-job", jobId); await poll(); }
   catch (error) { busy = false; message(error.message); controls(); }
 });
-el("select-ready").addEventListener("click", () => { for (const row of current.rows) if (row.eligible) selected.add(row.inventory_id); render(); });
+el("select-ready").addEventListener("click", () => {
+  if (busy || current?.state !== "prepared" || current.fetch_started) return;
+  const readyIds = current.rows.filter((row) => row.eligible).map((row) => row.inventory_id);
+  if (!readyIds.length) return;
+  if (readyIds.every((id) => selected.has(id))) readyIds.forEach((id) => selected.delete(id));
+  else readyIds.forEach((id) => selected.add(id));
+  render();
+});
 el("fetch").addEventListener("click", async () => {
   if (busy || !selected.size || current?.fetch_started) return;
   if (!el("username").value.trim() || !el("password").value) { message("请重新填写同一账号的用户名与密码。"); return; }
@@ -77,8 +90,9 @@ el("fetch").addEventListener("click", async () => {
 });
 el("cancel").addEventListener("click", async () => { try { await api("/api/installation/cancel", { job_id: jobId }); message("已请求停止后续卡；当前请求可能仍在执行。"); } catch (error) { message(error.message); } });
 el("recheck").addEventListener("click", () => { sessionStorage.setItem("profile-recheck-iccids", JSON.stringify(current.rows.map((r) => r.iccid))); location.href = "/"; });
-for (const id of ["username", "password", "base-url", "iccids"]) el(id).addEventListener("input", () => {
+for (const id of ["username", "base-url", "iccids"]) el(id).addEventListener("input", () => {
   if (busy) return;
+  if (current?.fetch_started) { message("输入已改变；本批次已保存的资料仍可下载。提交新 ICCID 前需重新核对。"); return; }
   revision++; current = null; selected.clear(); jobId = ""; sessionStorage.removeItem("installation-job"); render(); message("输入已改变，请重新核对。");
 });
 const imported = sessionStorage.getItem("installation-iccids");
