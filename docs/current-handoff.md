@@ -1,6 +1,6 @@
 # NexSim 本地工具交接（当前状态）
 
-更新时间：2026-09-30。项目目录：`D:\esim\nexsim-batch`；远端：`https://github.com/mememingm/jiaoben.git`。本文件是当时的快照；[早期交接记录](archive/HANDOFF.md)保留设计和多轮演变，其中关于未提交改动、当前基线与服务状态的描述已经过时。后续代码提交和服务状态应以实际检查为准。
+更新时间：2026-09-30。项目目录：`D:\esim\nexsim-batch`；远端：`https://github.com/mememingm/jiaoben.git`。本文件保留当时的交接快照；后续代码提交、目录结构和服务状态应以实际检查及根目录 `README.md` 为准。更早的交接记录可从 Git 历史恢复。
 
 ## 1. 交付状态
 

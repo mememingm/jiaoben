@@ -43,12 +43,11 @@ python3 -m venv .venv
 ## 项目文件
 
 - `nexsim_status_web.py` 与根目录的 `nexsim_*.py`：Web 服务、状态查询、安装和平台批次逻辑。它们互相导入，直接从项目根目录运行。
-- `oneoff.py`、`changgong_once.py`、`retry_e911.py`、`watch_changgong.py` 和 `export_excel.mjs`：较早的独立命令行工具，存在相互导入或相对路径依赖，因此仍保留在根目录。
+- `nexsim_admin_batch.py`：独立的管理后台命令行工具，使用方式见[通用后台脚本说明](docs/README-通用后台脚本.md)。
 - `web/`：三个页面及共用样式、动效；`tests/`：离线检查。
-- `docs/`：[当前交接](docs/current-handoff.md)、[手动安装](docs/manual-installation.md)、[开户套餐](docs/activation-products.md)、[状态工具说明](docs/README-eSIM状态查询工具.md)和[通用后台脚本说明](docs/README-通用后台脚本.md)。`docs/archive/` 保留早期交接记录。
-- `packages/`：早期打包 ZIP，作为历史交付留存；当前源码以仓库文件为准。
-- `.source/`：留存的平台前端静态文件；`outputs/`：本地业务记录和敏感安装资料，不受 Git 跟踪，迁移前需单独备份。
-- `.venv/`、`node_modules/`、`__pycache__/`：本机依赖或缓存，不提交到 Git。
+- `docs/`：[交接快照](docs/current-handoff.md)、[手动安装](docs/manual-installation.md)、[开户套餐](docs/activation-products.md)、[状态工具说明](docs/README-eSIM状态查询工具.md)和[通用后台脚本说明](docs/README-通用后台脚本.md)。
+- `outputs/`：本地业务记录和敏感安装资料，不受 Git 跟踪，迁移前需单独备份。
+- `.venv/`、`__pycache__/`：本机依赖或缓存，不提交到 Git。
 
 ## 平台开户注册流程
 

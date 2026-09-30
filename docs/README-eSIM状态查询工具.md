@@ -121,7 +121,7 @@ python3 nexsim_profile_writer.py --input ./outputs/esim-status-raw-YYYYMMDD-HHMM
 
 ## 平台批量开户激活（独立页面）
 
-`/activation.html` 与 Profile 状态查询是两个独立页面。它补齐 `oneoff.py` 中的平台侧开户能力，不代表实体 eUICC 写卡：
+`/activation.html` 与 Profile 状态查询是两个独立页面。平台侧开户不代表实体 eUICC 写卡：
 
 ```text
 选择已准备批次
