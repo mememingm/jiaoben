@@ -10,11 +10,13 @@ import io
 import json
 import os
 import re
+import secrets
 import sys
 import threading
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -1048,14 +1050,31 @@ class Handler(BaseHTTPRequestHandler):
         message = re.sub(r"im-[a-f0-9]{32}", "installation-job", message)
         print(f"{self.address_string()} - {message}")
 
-    def _json(self, value: Any, status: int = 200) -> None:
+    def _json(self, value: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        for name, header_value in (headers or {}).items():
+            self.send_header(name, header_value)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _installation_history_token(self) -> tuple[str, str | None]:
+        try:
+            cookies = SimpleCookie()
+            cookies.load(self.headers.get("Cookie", ""))
+            saved = cookies.get("esim_installation_history")
+            token = saved.value if saved else ""
+        except CookieError:
+            token = ""
+        if re.fullmatch(r"[a-f0-9]{64}", token):
+            return token, None
+        token = secrets.token_hex(32)
+        cookie = (f"esim_installation_history={token}; Path=/api/installation; "
+                  "Max-Age=31536000; HttpOnly; SameSite=Strict")
+        return token, cookie
 
     def _read_json(self) -> dict[str, Any]:
         try:
@@ -1110,6 +1129,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
+        if path == "/api/installation/history":
+            token, cookie = self._installation_history_token()
+            try:
+                items = self.installation_jobs.history_index(token)
+                self._json({"items": items}, headers={"Set-Cookie": cookie} if cookie else None)
+            except checker.Stop as exc:
+                self._json({"error": str(exc)}, 500)
+            return
         if path.startswith("/api/installation-jobs/"):
             suffix = path.removeprefix("/api/installation-jobs/")
             match = re.fullmatch(r"(im-[a-f0-9]{32})/files/([1-9][0-9]*)\.(txt|png)", suffix)
@@ -1473,7 +1500,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         try:
             if path == "/api/installation/prepare":
-                self._json({"job_id": self.installation_jobs.start_prepare(self._read_json())}, 202)
+                job_id = self.installation_jobs.start_prepare(self._read_json())
+                token, cookie = self._installation_history_token()
+                try:
+                    self.installation_jobs.remember_history(token, job_id)
+                    history_saved = True
+                except (checker.Stop, OSError):
+                    history_saved = False
+                self._json({"job_id": job_id, "history_saved": history_saved}, 202,
+                           {"Set-Cookie": cookie} if cookie else None)
+                return
+            if path == "/api/installation/history/attach":
+                job_id = self._read_json().get("job_id")
+                token, cookie = self._installation_history_token()
+                self.installation_jobs.remember_history(token, job_id)
+                self._json({"ok": True}, headers={"Set-Cookie": cookie} if cookie else None)
                 return
             if path == "/api/installation/fetch":
                 self._json({"job_id": self.installation_jobs.start_fetch(self._read_json())}, 202)

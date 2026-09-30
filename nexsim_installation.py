@@ -6,6 +6,7 @@ checks. No method in this module submits orders or activates subscriptions.
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import re
 import threading
@@ -30,12 +31,14 @@ def owner_of(client):
             "org_id": client.org_id, "username": client.account["username"]}
 
 
-def resolve_cards(client, iccids):
+def resolve_cards(client, iccids, on_progress=None):
     """Resolve the full requested set; unmatched targets must never disappear."""
     inventory = platform._all_pages(client, "/api/inventory/page",
                                     {"simType": "ESIM", "status": "USED"})
     results = []
-    for iccid in iccids:
+    if on_progress:
+        on_progress(0, len(iccids))
+    for index, iccid in enumerate(iccids, 1):
         matches = [r for r in inventory if r.get("iccid") == iccid
                    and r.get("ownerOrgId") == client.org_id]
         row = {"iccid": iccid, "eligible": False, "reason": "", "state": "blocked"}
@@ -68,6 +71,8 @@ def resolve_cards(client, iccids):
                     except platform.PlatformActivationStop:
                         row["reason"] = "Profile 查询失败，请重新核对"
         results.append(row)
+        if on_progress:
+            on_progress(index, len(iccids))
     return results
 
 
@@ -75,8 +80,57 @@ class InstallationManager:
     def __init__(self, output_dir):
         self.output_dir = Path(output_dir).resolve()
         self.root = self.output_dir / "installation-batches"
+        self.history_root = self.output_dir / "installation-history"
         self.jobs = {}
         self.lock = threading.Lock()
+        self.history_lock = threading.Lock()
+
+    def _history_path(self, token):
+        if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{64}", token):
+            raise InstallationStop("历史记录访问凭据无效。")
+        return self.history_root / f"{hashlib.sha256(token.encode()).hexdigest()}.json"
+
+    def remember_history(self, token, job_id):
+        if not self.snapshot(job_id):
+            raise InstallationStop("任务不存在，无法加入历史记录。")
+        path = self._history_path(token)
+        with self.history_lock:
+            try:
+                ids = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                ids = []
+            except (OSError, ValueError) as exc:
+                raise InstallationStop("历史索引无法读取，请先检查本地记录。") from exc
+            if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+                raise InstallationStop("历史索引已损坏，请先检查本地记录。")
+            ids = [job_id] + [value for value in ids if value != job_id]
+            checker.atomic_write(path, json.dumps(ids).encode("utf-8"))
+
+    def history_index(self, token):
+        path = self._history_path(token)
+        with self.history_lock:
+            try:
+                ids = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return []
+            except (OSError, ValueError) as exc:
+                raise InstallationStop("历史索引无法读取，请先检查本地记录。") from exc
+            if not isinstance(ids, list):
+                raise InstallationStop("历史索引已损坏，请先检查本地记录。")
+        items = []
+        for job_id in ids:
+            job = self.snapshot(job_id)
+            if not job:
+                continue
+            rows = job.get("rows", [])
+            items.append({"id": job_id, "created_at": job.get("created_at"),
+                          "state": job.get("state"),
+                          "count": job.get("requested_count", len(rows)),
+                          "first_iccid_tail": str(rows[0].get("iccid", ""))[-4:] if rows else "",
+                          "eligible": sum(row.get("eligible") is True for row in rows),
+                          "saved": sum(row.get("state") == "saved" for row in rows),
+                          "fetch_started": job.get("fetch_started", False)})
+        return items
 
     def _client(self, payload):
         return platform.PlatformClient(payload.get("base_url") or "https://admin.nexsimus.com",
@@ -94,8 +148,13 @@ class InstallationManager:
         job_id = "im-" + uuid.uuid4().hex
         with self.lock:
             self.jobs[job_id] = {"id": job_id, "state": "checking", "rows": [],
-                                 "message": "正在匹配库存和 Profile 状态", "owner": None,
+                                 "created_at": checker.now(),
+                                 "requested_count": len(iccids),
+                                 "message": "正在登录平台", "owner": None,
+                                 "progress": {"phase": "登录平台", "completed": 0,
+                                              "total": len(iccids), "percent": None},
                                  "fetch_started": False, "cancel": False}
+        self._persist(job_id)
         threading.Thread(target=self._prepare, args=(job_id, dict(payload), iccids), daemon=True).start()
         return job_id
 
@@ -107,11 +166,25 @@ class InstallationManager:
         try:
             client = self._client(payload)
             owner = owner_of(client)
-            rows = resolve_cards(client, iccids)
-            for row in rows:
+            self._update(job_id, message="正在读取当前组织的 USED 库存",
+                         progress={"phase": "读取 USED 库存", "completed": 0,
+                                   "total": len(iccids), "percent": None})
+
+            def profile_progress(completed, total):
+                self._update(job_id, message=f"正在核对库存与 Profile：{completed}/{total}",
+                             progress={"phase": "核对库存与 Profile", "completed": completed,
+                                       "total": total, "percent": round(80 * completed / total)})
+
+            rows = resolve_cards(client, iccids, profile_progress)
+            for index, row in enumerate(rows, 1):
                 if row["eligible"] and self._previous_attempt(owner, row):
                     row.update(eligible=False, reason="已有获取记录，请核查本地资料；禁止重复获取", state="blocked")
+                self._update(job_id, message=f"正在核对历史获取记录：{index}/{len(rows)}",
+                             progress={"phase": "核对历史获取记录", "completed": index,
+                                       "total": len(rows), "percent": 80 + round(20 * index / len(rows))})
             self._update(job_id, owner=owner, rows=rows, state="prepared",
+                         progress={"phase": "核对完成", "completed": len(rows),
+                                   "total": len(rows), "percent": 100},
                          message=f"核对 {len(rows)} 张，可处理 {sum(r['eligible'] for r in rows)} 张；尚未获取安装资料")
         except (platform.PlatformActivationStop, InstallationStop) as exc:
             self._update(job_id, state="failed", message=str(exc))
@@ -119,6 +192,7 @@ class InstallationManager:
             self._update(job_id, state="failed", message="核对失败，未获取安装资料")
         finally:
             payload.clear()
+            self._persist(job_id)
 
     def _marker(self, owner, row):
         # Shared identity, independent of batch ID. Exclusive create prevents two
@@ -240,14 +314,22 @@ class InstallationManager:
         with self.lock:
             job = self.jobs.get(job_id)
             if job:
-                return json.loads(json.dumps({k: v for k, v in job.items() if k != "cancel"}))
+                result = {k: v for k, v in job.items() if k != "cancel"}
+                result["fetch_available"] = job["state"] == "prepared" and not job["fetch_started"]
+                return json.loads(json.dumps(result))
         try:
             saved = json.loads((self.root / job_id / "record.json").read_text(encoding="utf-8"))
             if saved.get("id") != job_id or not isinstance(saved.get("rows"), list):
                 return None
-            if saved.get("state") in {"checking", "fetching"}:
+            if saved.get("state") == "checking":
+                saved.update(state="interrupted", fetch_started=False,
+                             message="只读核对被服务中断，可重新核对 ICCID；尚未请求安装资料。")
+            elif saved.get("state") == "fetching":
                 saved.update(state="interrupted", fetch_started=True,
                              message="服务曾中断。已保存资料可下载，其他记录需核查；不会自动重试。")
+            elif saved.get("state") == "prepared":
+                saved["message"] = "历史核对结果仅供查看；要获取资料，请重新只读核对 ICCID。"
+            saved["fetch_available"] = False
             return saved
         except (OSError, ValueError, AttributeError):
             return None

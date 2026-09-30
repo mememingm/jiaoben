@@ -25,11 +25,21 @@
         </form>
       </section>
       <section class="safety-note"><div><strong>用于已开通号码的设备安装</strong><p>获取二维码和 LPA 后，由你手动下载安装。本页不会新建订单、再次开户或自动写入设备。</p></div></section>
+      <section class="panel installation-history-panel">
+        <div class="panel-header"><div><span class="panel-kicker">HISTORY</span><h2>历史记录</h2></div></div>
+        <p id="history-status" class="installation-history-status">正在读取本机历史记录……</p>
+        <ul id="installation-history" class="installation-history-list"></ul>
+        <p class="installation-history-note">记录保留在当前浏览器。清除本站 Cookie 后，历史入口会失效；已保存的资料仍在服务端。</p>
+      </section>
     </aside>
     <section class="data-panel">
       <section class="table-container">
         <div class="table-header"><div><span class="panel-kicker">REVIEW</span><h2>逐卡核对与处理结果</h2></div></div>
         <p id="message" class="form-message" role="status" aria-live="polite">输入 ICCID 后开始核对。</p>
+        <div id="check-progress" class="installation-progress" hidden>
+          <div class="installation-progress-head"><span>只读核对进度</span><strong id="check-progress-label">准备中</strong></div>
+          <progress id="check-progress-bar" max="100" aria-label="只读核对进度"></progress>
+        </div>
         <div class="toolbar">
           <button id="select-ready" class="button button-secondary" disabled>选择全部可处理卡</button>
           <button id="fetch" class="button button-primary" disabled>获取所选卡的安装资料</button>
