@@ -1483,6 +1483,8 @@ class Handler(BaseHTTPRequestHandler):
             "/activation.js": (WEB_ROOT / "activation.js", "text/javascript; charset=utf-8"),
             "/installation.html": (WEB_ROOT / "installation.html", "text/html; charset=utf-8"),
             "/installation.js": (WEB_ROOT / "installation.js", "text/javascript; charset=utf-8"),
+            "/motion.js": (WEB_ROOT / "motion.js", "text/javascript; charset=utf-8"),
+            "/vendor/gsap.min.js": (WEB_ROOT / "vendor" / "gsap.min.js", "text/javascript; charset=utf-8"),
         }
         entry = files.get(path)
         if entry is None or not entry[0].is_file():
